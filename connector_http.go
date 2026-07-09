@@ -122,6 +122,12 @@ func (hc *HTTPConnector) Home() (err error) {
 	return
 }
 
+func (hc *HTTPConnector) StartPrint() (err error) {
+	log.Printf("Starting print job...")
+	_, err = hc.request(120).Post(hc.URL("/start_print"))
+	return
+}
+
 func (hc *HTTPConnector) Upload(payload *Payload) (err error) {
 	log.Printf("Uploading via HTTP protocol")
 	finished := make(chan empty, 1)

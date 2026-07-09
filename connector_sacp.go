@@ -94,3 +94,7 @@ func (sc *SACPConnector) Home() (err error) {
 func init() {
 	Connector.RegisterHandler(&SACPConnector{})
 }
+
+func (sc *SACPConnector) StartPrint() error {
+	return nil
+}

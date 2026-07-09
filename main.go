@@ -15,6 +15,7 @@ import (
 )
 
 var (
+	StartAfterUpload bool
 	Host                string
 	KnownHosts          string
 	DiscoverTimeout     time.Duration
@@ -63,6 +64,7 @@ func main() {
 	flag.BoolVar(&Home, "home", parseBoolEnv("HOME", false), "home the printer")
 	flag.DurationVar(&DiscoverTimeout, "timeout", parseDurationEnv("TIMEOUT", 4*time.Second), "printer discovery timeout")
 	flag.BoolVar(&NoFix, "nofix", parseBoolEnv("NOFIX", false), "disable SMFix(built-in)")
+	flag.BoolVar(&StartAfterUpload, "start", parseBoolEnv("START", false), "start printing after upload (octoprint also honors slicer print=true)")
 	flag.StringVar(&OutputDir, "output", os.Getenv("OUTPUT_DIR"), "output directory to save original and fixed files")
 	flag.BoolVar(&Debug, "debug", parseBoolEnv("DEBUG", false), "debug mode")
 
@@ -248,7 +250,7 @@ func main() {
 		}
 
 		log.Printf("Uploading file '%s' [%s]...", p.Name, p.ReadableSize())
-		if err := Connector.Upload(printer, p); err != nil {
+		if err := Connector.Upload(printer, p, StartAfterUpload); err != nil {
 			log.Panicln(err)
 		} else {
 			log.Println("Upload finished.")

@@ -108,6 +108,7 @@ type Handler interface {
 	SetToolTemperature(int, int) error
 	SetBedTemperature(int, int) error
 	Home() error
+	StartPrint() error
 }
 
 func (c *connector) RegisterHandler(h Handler) {
@@ -115,7 +116,7 @@ func (c *connector) RegisterHandler(h Handler) {
 }
 
 // Upload to upload a file to a printer
-func (c *connector) Upload(printer *Printer, payload *Payload) error {
+func (c *connector) Upload(printer *Printer, payload *Payload, start bool) error {
 	// Iterate through all handlers
 	for _, h := range c.handlers {
 		// Check if handler can ping the printer
@@ -135,6 +136,13 @@ func (c *connector) Upload(printer *Printer, payload *Payload) error {
 			// Upload the file to the printer
 			if err := h.Upload(payload); err != nil {
 				return err
+			}
+
+			// Start the print if requested
+			if start {
+				if err := h.StartPrint(); err != nil {
+					return err
+				}
 			}
 
 			// Return nil if successful

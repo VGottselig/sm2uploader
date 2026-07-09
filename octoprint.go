@@ -180,7 +180,11 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 				payload.Name, payload.ShouldBeFix(), effectiveNoFix)
 		}
 
-		if err := Connector.Upload(printer, payload); err != nil {
+		startRequested := StartAfterUpload || r.FormValue("print") == "true"
+		if startRequested {
+			log.Printf("Print start requested (print=%q)", r.FormValue("print"))
+		}
+		if err := Connector.Upload(printer, payload, startRequested); err != nil {
 			_stats.addFailure(payload.Name, payload.Size)
 			internalServerErrorResponse(w, err.Error())
 			return

@@ -179,3 +179,7 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 func init() {
 	Connector.RegisterHandler(&MoonrakerConnector{})
 }
+
+func (mc *MoonrakerConnector) StartPrint() error {
+	return nil
+}
