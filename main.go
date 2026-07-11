@@ -85,6 +85,15 @@ func main() {
 
 	var printer *Printer
 	ls := NewLocalStorage(KnownHosts)
+	// Persist the token to known hosts whenever it is (re)obtained on connect,
+	// so it survives container restarts and avoids a fresh touchscreen auth.
+	OnPrinterUpdate = func(p *Printer) {
+		if p == nil {
+			return
+		}
+		ls.Add(p)
+		_ = ls.Save()
+	}
 	defer func() {
 		if printer != nil {
 			// update printer's token
@@ -143,7 +152,8 @@ func main() {
 			}
 		} else {
 			// directly to printer using ip/hostname
-			printer = &Printer{IP: Host}
+			// keep an ID so the token gets persisted (ls.Add skips ID-less printers)
+			printer = &Printer{IP: Host, ID: Host}
 		}
 	}
 
