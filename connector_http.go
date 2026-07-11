@@ -188,7 +188,21 @@ func (hc *HTTPConnector) Upload(payload *Payload) (err error) {
 		}
 	}, 35*time.Millisecond)
 
-	_, err = r.Post(hc.URL("/upload"))
+	// Luban behavior: when printing, send the file via /prepare_print with type=3DP
+	// (this loads it as the active print job, including the heating sequence), then
+	// call /start_print with the token only. A plain upload just stores the file.
+	if payload.Print {
+		r.SetFormData(map[string]string{"type": "3DP"})
+		if _, err = r.Post(hc.URL("/prepare_print")); err != nil {
+			return
+		}
+		log.SetOutput(os.Stderr)
+		log.Printf("Print job prepared")
+		err = hc.StartPrint()
+		log.SetOutput(w)
+	} else {
+		_, err = r.Post(hc.URL("/upload"))
+	}
 	return
 }
 
