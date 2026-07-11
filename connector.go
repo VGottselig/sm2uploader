@@ -23,6 +23,7 @@ type Payload struct {
 	Name      string
 	Size      int64
 	FixedFile string // path to the fixed (processed) file for streaming upload
+	Print     bool   // when true, upload via /prepare_print and start the job (Luban behavior)
 }
 
 func (p *Payload) SetName(name string) {
@@ -133,16 +134,12 @@ func (c *connector) Upload(printer *Printer, payload *Payload, start bool) error
 			if payload.Size < FILE_SIZE_MIN {
 				return errFileEmpty
 			}
-			// Upload the file to the printer
+			// Upload the file to the printer. When a start is requested, the HTTP
+			// handler uploads via /prepare_print and starts the job the way Luban does
+			// (loads the file as the active print job incl. heating, then /start_print).
+			payload.Print = start
 			if err := h.Upload(payload); err != nil {
 				return err
-			}
-
-			// Start the print if requested
-			if start {
-				if err := h.StartPrint(); err != nil {
-					return err
-				}
 			}
 
 			// Return nil if successful
