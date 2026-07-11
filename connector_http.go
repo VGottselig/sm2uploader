@@ -70,6 +70,10 @@ func (hc *HTTPConnector) Connect() error {
 			hc.printer.Token = result.Token
 		}
 		tip := false
+		// Never hold the printer's single connection open indefinitely: wait at
+		// most 5 minutes for the touchscreen authorization, then release the
+		// (pending) session and give up so other clients aren't blocked.
+		deadline := time.Now().Add(5 * time.Minute)
 		for {
 			switch hc.checkStatus() {
 			case AuthStatusApproved:
@@ -77,7 +81,11 @@ func (hc *HTTPConnector) Connect() error {
 			case AuthStatusWaiting:
 				if !tip {
 					tip = true
-					log.Println(">>> Please tap Yes on Snapmaker touchscreen to continue <<<")
+					log.Println(">>> Please tap Yes on Snapmaker touchscreen to continue (waiting up to 5 min) <<<")
+				}
+				if time.Now().After(deadline) {
+					hc.Disconnect()
+					return fmt.Errorf("timeout waiting for touchscreen authorization (5 min)")
 				}
 				// wait for auth on HMI
 				<-time.After(2 * time.Second)
