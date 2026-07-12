@@ -51,13 +51,11 @@ func (hc *HTTPConnector) Connect() error {
 			if Debug {
 				log.Printf("-- retrying %s -> %d, token %s", r.Request.URL, r.StatusCode, hc.printer.Token)
 			}
-
-			// token expired
-			if r.StatusCode == 403 && hc.printer.Token != "" {
-				hc.printer.Token = ""
-				// reconnect with no token to get new one
-				return true
-			}
+			// A 403 here means the printer's single connection is currently held by
+			// another client (busy) — NOT that the token is invalid. Do not discard
+			// the (valid) token and do not fall back to a fresh touchscreen auth;
+			// just fail, so a later retry with the same token succeeds once the
+			// connection is free.
 			return false
 		})
 
@@ -102,6 +100,10 @@ func (hc *HTTPConnector) Connect() error {
 		*/
 	}
 
+	if resp.StatusCode == 403 {
+		// Connection held by another client; keep the token so a retry works once free.
+		return fmt.Errorf("printer busy: another client holds the connection")
+	}
 	return fmt.Errorf("connect error %d", resp.StatusCode)
 }
 
