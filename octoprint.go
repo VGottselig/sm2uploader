@@ -75,6 +75,9 @@ func (s *stats) String() string {
 	buf.WriteString(fmt.Sprintf("success: %d, failure: %d\n", s.success, s.failure))
 	buf.WriteString(fmt.Sprintf("last success: %s\n - %s (%s)\n", s.lastSuccess.time.Format(time.RFC3339), s.lastSuccess.filaname, humanReadableSize(s.lastSuccess.size)))
 	buf.WriteString(fmt.Sprintf("last failure: %s\n - %s (%s)\n", s.lastFailure.time.Format(time.RFC3339), s.lastFailure.filaname, humanReadableSize(s.lastFailure.size)))
+
+	buf.WriteString("\n###LOG### (newest first)\n")
+	buf.WriteString(LogRing.String())
 	return buf.String()
 }
 

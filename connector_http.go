@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"time"
 
 	"github.com/gosuri/uilive"
@@ -165,7 +164,7 @@ func (hc *HTTPConnector) Upload(payload *Payload) (err error) {
 	log.SetOutput(w)
 	defer func() {
 		w.Stop()
-		log.SetOutput(os.Stderr)
+		log.SetOutput(LogOut)
 	}()
 
 	file := req.FileUpload{
@@ -174,11 +173,11 @@ func (hc *HTTPConnector) Upload(payload *Payload) (err error) {
 		GetFileContent: func() (io.ReadCloser, error) {
 			rc, err := payload.StreamContent(NoFix)
 			if !NoFix && err == nil && payload.ShouldBeFix() {
-				log.SetOutput(os.Stderr)
+				log.SetOutput(LogOut)
 				log.Printf("G-Code fixed")
 				log.SetOutput(w)
 			} else if err != nil {
-				log.SetOutput(os.Stderr)
+				log.SetOutput(LogOut)
 				log.Printf("G-Code fix error(ignored): %s", err)
 				log.SetOutput(w)
 			}
@@ -206,7 +205,7 @@ func (hc *HTTPConnector) Upload(payload *Payload) (err error) {
 		if _, err = r.Post(hc.URL("/prepare_print")); err != nil {
 			return
 		}
-		log.SetOutput(os.Stderr)
+		log.SetOutput(LogOut)
 		log.Printf("Print job prepared")
 		err = hc.StartPrint()
 		log.SetOutput(w)
