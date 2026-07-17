@@ -1,6 +1,7 @@
 package main
 
 import (
+	"html"
 	"io"
 	"log"
 	"os"
@@ -44,6 +45,46 @@ func (lr *logRing) String() string {
 		b.WriteString(", ")
 		b.WriteString(e.msg)
 		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// logClass classifies a log message for status-page coloring.
+func logClass(msg string) string {
+	low := strings.ToLower(msg)
+	switch {
+	case containsAny(low, "error", "fail", "fehler", "panic", "timeout", "refused",
+		"busy", "denied", "unable", "cannot", "not connected", "not allowed", "invalid"):
+		return "log-err"
+	case containsAny(low, "upload finished", "prepared", "starting print",
+		"print start requested", "success", "completed", "done", "server started"):
+		return "log-ok"
+	}
+	return "log-info"
+}
+
+// HTML renders the buffered lines newest-first as colored <span> rows for the
+// status page (failures red, successes green).
+func (lr *logRing) HTML() string {
+	lr.mu.Lock()
+	defer lr.mu.Unlock()
+	var b strings.Builder
+	for i := len(lr.entries) - 1; i >= 0; i-- {
+		e := lr.entries[i]
+		b.WriteString(`<span class="` + logClass(e.msg) + `">`)
+		b.WriteString(html.EscapeString(e.t.Format("2006-01-02 15:04:05")))
+		b.WriteString(", ")
+		b.WriteString(html.EscapeString(e.msg))
+		b.WriteString("</span>\n")
 	}
 	return b.String()
 }
