@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -17,6 +19,26 @@ import (
 const (
 	maxMemory = 64 << 20 // 64MB
 )
+
+const pageCSS = `
+body{background:#1b1b1d;color:#e0e0e0;font:14px/1.5 system-ui,"Segoe UI",Roboto,sans-serif;margin:0;padding:18px;max-width:920px}
+h1{font-size:19px;margin:0 0 2px}h1 .ver{color:#6b7280;font-size:13px;font-weight:400}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:#9ca3af;margin:22px 0 8px}
+h2 .hint{text-transform:none;letter-spacing:0;font-weight:400;color:#6b7280}
+.meta{color:#8b8b8b;font-size:13px;margin-bottom:16px}.meta b{color:#cbd5e1}
+.upload{background:#26262a;border:1px solid #383840;border-radius:10px;padding:16px;display:flex;flex-wrap:wrap;gap:14px;align-items:center}
+.upload input[type=file]{color:#ddd;font-size:13px;min-width:0;flex:1 1 200px}
+.upload label{display:flex;align-items:center;gap:7px;color:#cbd5e1}
+.upload button{margin-left:auto;background:#3b82f6;color:#fff;border:0;border-radius:7px;padding:9px 20px;font-size:14px;font-weight:500;cursor:pointer}
+.upload button:hover{background:#2563eb}
+.banner{padding:10px 14px;border-radius:7px;margin:14px 0;font-size:14px}
+.banner-ok{background:#123524;color:#86efac;border:1px solid #166534}
+.banner-err{background:#3b1414;color:#fca5a5;border:1px solid #991b1b}
+.stats{background:#232327;border-radius:8px;padding:12px 14px;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#b8b8b8;white-space:pre-wrap;overflow-x:auto;margin:0}
+.log{background:#141416;border-radius:8px;padding:12px 14px;font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;overflow:auto;max-height:60vh}
+.log span{display:block;white-space:pre-wrap;word-break:break-word}
+.log-err{color:#f87171}.log-ok{color:#4ade80}.log-info{color:#c3c7cf}
+`
 
 var (
 	fixShutoff        = true
@@ -64,7 +86,7 @@ func (s *stats) addFailure(filaname string, size int64) {
 	}
 }
 
-func (s *stats) String() string {
+func (s *stats) StatsText() string {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 	s.memory = mem.Alloc
@@ -75,10 +97,11 @@ func (s *stats) String() string {
 	buf.WriteString(fmt.Sprintf("success: %d, failure: %d\n", s.success, s.failure))
 	buf.WriteString(fmt.Sprintf("last success: %s\n - %s (%s)\n", s.lastSuccess.time.Format(time.RFC3339), s.lastSuccess.filaname, humanReadableSize(s.lastSuccess.size)))
 	buf.WriteString(fmt.Sprintf("last failure: %s\n - %s (%s)\n", s.lastFailure.time.Format(time.RFC3339), s.lastFailure.filaname, humanReadableSize(s.lastFailure.size)))
-
-	buf.WriteString("\n###LOG### (newest first)\n")
-	buf.WriteString(LogRing.String())
 	return buf.String()
+}
+
+func (s *stats) String() string {
+	return s.StatsText() + "\n###LOG### (newest first)\n" + LogRing.String()
 }
 
 func LoggingMiddleware(next http.Handler) http.Handler {
@@ -104,13 +127,31 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		} else if printer.Moonraker {
 			protocol = "Moonraker"
 		}
-		resp := `sm2uploader ` + Version + ` - https://github.com/macdylan/sm2uploader` + "\n\n" +
-			`	printer id: ` + printer.ID + "\n" +
-			`	printer ip: ` + printer.IP + "\n" +
-			`	protocol: ` + protocol + "\n\n" +
-			_stats.String()
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		writeResponse(w, http.StatusOK, resp)
+		banner := ""
+		if ok := r.URL.Query().Get("ok"); ok != "" {
+			banner = `<div class="banner banner-ok">Hochgeladen: ` + html.EscapeString(ok) + `</div>`
+		} else if e := r.URL.Query().Get("err"); e != "" {
+			banner = `<div class="banner banner-err">Fehler: ` + html.EscapeString(e) + `</div>`
+		}
+		page := `<!doctype html><html lang="de"><head><meta charset="utf-8">` +
+			`<meta name="viewport" content="width=device-width,initial-scale=1">` +
+			`<title>sm2uploader</title><style>` + pageCSS + `</style></head><body>` +
+			`<h1>sm2uploader <span class="ver">` + html.EscapeString(Version) + `</span></h1>` +
+			`<div class="meta">printer <b>` + html.EscapeString(printer.ID) + `</b> @ ` +
+			html.EscapeString(printer.IP) + ` · ` + protocol + `</div>` +
+			banner +
+			`<form class="upload" method="POST" action="/api/files/local" enctype="multipart/form-data">` +
+			`<input type="hidden" name="gui" value="1">` +
+			`<input type="file" name="file" accept=".gcode,.gco,.g,.nc" required>` +
+			`<label><input type="checkbox" name="print" value="true"> Druck sofort starten</label>` +
+			`<button type="submit">Hochladen</button>` +
+			`</form>` +
+			`<h2>Status</h2><pre class="stats">` + html.EscapeString(_stats.StatsText()) + `</pre>` +
+			`<h2>Log <span class="hint">(neueste oben)</span></h2>` +
+			`<div class="log">` + LogRing.HTML() + `</div>` +
+			`</body></html>`
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		writeResponse(w, http.StatusOK, page)
 	})
 
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
@@ -187,8 +228,13 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		if startRequested {
 			log.Printf("Print start requested (print=%q)", r.FormValue("print"))
 		}
+		gui := r.FormValue("gui") == "1"
 		if err := Connector.Upload(printer, payload, startRequested); err != nil {
 			_stats.addFailure(payload.Name, payload.Size)
+			if gui {
+				http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+				return
+			}
 			internalServerErrorResponse(w, err.Error())
 			return
 		}
@@ -197,6 +243,10 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 
 		log.Printf("Upload finished: %s [%s]", fd.Filename, payload.ReadableSize())
 
+		if gui {
+			http.Redirect(w, r, "/?ok="+url.QueryEscape(fd.Filename), http.StatusSeeOther)
+			return
+		}
 		// Return success response
 		writeResponse(w, http.StatusOK, `{"done": true}`)
 	})
