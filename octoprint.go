@@ -149,7 +149,7 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			`<label><input type="checkbox" name="print" value="true"> Druck sofort starten</label>` +
 			`<button type="submit">Hochladen</button>` +
 			`</form>` +
-			`<div class="actions"><a class="dl" href="/download">&#8595; Aktuelle gcode herunterladen</a></div>` +
+			`<div class="actions"><a class="dl" href="/download">&#8595; Aktuelle gcode-Datei herunterladen</a></div>` +
 			`<h2>Status</h2><pre class="stats">` + html.EscapeString(_stats.StatsText()) + `</pre>` +
 			`<h2>Log <span class="hint">(neueste oben)</span></h2>` +
 			`<div class="log">` + LogRing.HTML() + `</div>` +
