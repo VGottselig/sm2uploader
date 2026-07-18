@@ -38,6 +38,9 @@ h2 .hint{text-transform:none;letter-spacing:0;font-weight:400;color:#6b7280}
 .log{background:#141416;border-radius:8px;padding:12px 14px;font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;overflow:auto;max-height:60vh}
 .log span{display:block;white-space:pre-wrap;word-break:break-word}
 .log-err{color:#f87171}.log-ok{color:#4ade80}.log-info{color:#c3c7cf}
+.actions{margin:14px 0}
+.dl{display:inline-block;background:#374151;color:#e5e7eb;text-decoration:none;border-radius:7px;padding:9px 16px;font-size:14px;border:1px solid #4b5563}
+.dl:hover{background:#4b5563}
 `
 
 var (
@@ -146,6 +149,7 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			`<label><input type="checkbox" name="print" value="true"> Druck sofort starten</label>` +
 			`<button type="submit">Hochladen</button>` +
 			`</form>` +
+			`<div class="actions"><a class="dl" href="/download">&#8595; Aktuelle gcode herunterladen</a></div>` +
 			`<h2>Status</h2><pre class="stats">` + html.EscapeString(_stats.StatsText()) + `</pre>` +
 			`<h2>Log <span class="hint">(neueste oben)</span></h2>` +
 			`<div class="log">` + LogRing.HTML() + `</div>` +
@@ -157,6 +161,25 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
 		respVersion := `{"api": "0.1", "server": "1.2.3", "text": "OctoPrint 1.2.3/Dummy"}`
 		writeResponse(w, http.StatusOK, respVersion)
+	})
+
+	// /download streams the gcode of the file currently loaded on the printer
+	// (via the printer's /api/v1/print_file) back to the browser as a download.
+	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
+		data, filename, err := Connector.DownloadCurrent(printer)
+		if err != nil {
+			http.Redirect(w, r, "/?err="+url.QueryEscape("Download fehlgeschlagen: "+err.Error()), http.StatusSeeOther)
+			return
+		}
+		filename = strings.NewReplacer(`"`, "", "\r", "", "\n", "", "/", "_", `\`, "_").Replace(filename)
+		if filename == "" {
+			filename = "print.gcode"
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
 	})
 
 	mux.HandleFunc("/api/files/local", func(w http.ResponseWriter, r *http.Request) {
