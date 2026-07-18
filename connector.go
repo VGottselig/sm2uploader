@@ -202,34 +202,6 @@ func (c *connector) PreHeatCommands(printer *Printer, tool_1_temperature int, to
 	return errors.New("Printer " + printer.IP + " is not available.")
 }
 
-// Downloader is implemented by handlers that can fetch the file currently
-// loaded on the device. Only the HTTP/SSTP API supports this (print_file).
-type Downloader interface {
-	DownloadCurrent() (data []byte, filename string, err error)
-}
-
-// DownloadCurrent fetches the gcode of the file currently loaded/printing.
-func (c *connector) DownloadCurrent(printer *Printer) ([]byte, string, error) {
-	for _, h := range c.handlers {
-		if !h.Ping(printer) {
-			continue
-		}
-		dl, ok := h.(Downloader)
-		if !ok {
-			return nil, "", errors.New("download not supported for this printer type")
-		}
-		if err := h.Connect(); err != nil {
-			return nil, "", err
-		}
-		defer h.Disconnect()
-		if OnPrinterUpdate != nil {
-			OnPrinterUpdate(printer)
-		}
-		return dl.DownloadCurrent()
-	}
-	return nil, "", errors.New("Printer " + printer.IP + " is not available.")
-}
-
 var Connector = &connector{}
 
 // ping the printer to see if it is available
