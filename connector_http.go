@@ -266,6 +266,39 @@ func (hc *HTTPConnector) URL(path string) string {
 	return fmt.Sprintf("http://%s:%s/api/v1%s", hc.printer.IP, HTTPPort, path)
 }
 
+// currentFileName returns the fileName of the currently loaded job, or "".
+func (hc *HTTPConnector) currentFileName() string {
+	result := struct {
+		FileName string `json:"fileName"`
+	}{}
+	resp, err := hc.request(8).SetResult(&result).Get(hc.URL("/status"))
+	if err != nil || resp.StatusCode != 200 {
+		return ""
+	}
+	return result.FileName
+}
+
+// DownloadCurrent fetches the gcode of the file currently loaded on the printer
+// via GET /api/v1/print_file. Requires an active session (Connect first).
+func (hc *HTTPConnector) DownloadCurrent() ([]byte, string, error) {
+	filename := hc.currentFileName()
+	if filename == "" {
+		filename = "print.gcode"
+	}
+	resp, err := hc.request(180).Get(hc.URL("/print_file"))
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != 200 {
+		return nil, "", fmt.Errorf("print_file returned HTTP %d", resp.StatusCode)
+	}
+	data := resp.Bytes()
+	if len(data) == 0 {
+		return nil, "", fmt.Errorf("print_file returned an empty file (nothing loaded?)")
+	}
+	return data, filename, nil
+}
+
 func init() {
 	Connector.RegisterHandler(&HTTPConnector{})
 }
