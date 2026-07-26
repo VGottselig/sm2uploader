@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gosuri/uilive"
@@ -167,24 +169,29 @@ func (hc *HTTPConnector) Upload(payload *Payload) (err error) {
 		log.SetOutput(LogOut)
 	}()
 
+	// Materialize the content up front so the multipart FileSize exactly matches
+	// the bytes we stream. For G-Code-fixed files the processed size differs from
+	// the original; using the original size (as before) produced a Content-Length
+	// mismatch that left larger uploads incomplete on the printer (it kept the old
+	// job active). Container RAM is ample and typical gcode is tens of MB.
+	content, cerr := payload.GetContent(NoFix)
+	if cerr != nil {
+		log.SetOutput(LogOut)
+		log.Printf("G-Code fix error: %s", cerr)
+		return cerr
+	}
+	if !NoFix && payload.ShouldBeFix() {
+		log.SetOutput(LogOut)
+		log.Printf("G-Code fixed")
+		log.SetOutput(w)
+	}
 	file := req.FileUpload{
 		ParamName: "file",
 		FileName:  payload.Name,
 		GetFileContent: func() (io.ReadCloser, error) {
-			rc, err := payload.StreamContent(NoFix)
-			if !NoFix && err == nil && payload.ShouldBeFix() {
-				log.SetOutput(LogOut)
-				log.Printf("G-Code fixed")
-				log.SetOutput(w)
-			} else if err != nil {
-				log.SetOutput(LogOut)
-				log.Printf("G-Code fix error(ignored): %s", err)
-				log.SetOutput(w)
-			}
-			return rc, err
+			return io.NopCloser(bytes.NewReader(content)), nil
 		},
-		FileSize: payload.Size,
-		// ContentType: "application/octet-stream",
+		FileSize: int64(len(content)),
 	}
 	r := hc.request(0)
 	r.SetFileUpload(file)
@@ -209,10 +216,40 @@ func (hc *HTTPConnector) Upload(payload *Payload) (err error) {
 		log.Printf("Print job prepared")
 		err = hc.StartPrint()
 		log.SetOutput(w)
+		if err == nil {
+			err = hc.verifyLoaded(payload.Name)
+		}
 	} else {
 		_, err = r.Post(hc.URL("/upload"))
 	}
 	return
+}
+
+// verifyLoaded confirms the printer actually loaded/started the just-uploaded
+// file. If /status reports a clearly different fileName, the upload wasn't
+// applied (e.g. the previous job is still active) and we return an error, so the
+// caller reports a real failure instead of a false "Upload finished".
+func (hc *HTTPConnector) verifyLoaded(name string) error {
+	un := strings.ToLower(name)
+	for i := 0; i < 3; i++ {
+		time.Sleep(2 * time.Second)
+		result := struct {
+			FileName string `json:"fileName"`
+		}{}
+		resp, e := hc.request(8).SetResult(&result).Get(hc.URL("/status"))
+		if e != nil || resp.StatusCode != 200 {
+			continue
+		}
+		pn := strings.ToLower(result.FileName)
+		if pn == "" {
+			continue
+		}
+		if strings.HasPrefix(un, pn) || strings.HasPrefix(pn, un) {
+			return nil // correct file loaded
+		}
+		return fmt.Errorf("printer is on %q, not the uploaded %q -- upload not applied (printer storage/size?)", result.FileName, name)
+	}
+	return nil // couldn't verify (busy/unreachable) -- don't block
 }
 
 func (hc *HTTPConnector) request(timeout ...int) *req.Request {
