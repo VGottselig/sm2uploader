@@ -147,8 +147,9 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			`<button type="submit">Hochladen</button>` +
 			`</form>` +
 			`<h2>Status</h2><pre class="stats">` + html.EscapeString(_stats.StatsText()) + `</pre>` +
-			`<h2>Log <span class="hint">(neueste oben)</span></h2>` +
+			`<h2>Log <span class="hint">(neueste oben, aktualisiert automatisch)</span></h2>` +
 			`<div class="log">` + LogRing.HTML() + `</div>` +
+			`<script>setInterval(function(){fetch('/log',{cache:'no-store'}).then(function(r){return r.text()}).then(function(h){var e=document.querySelector('.log');if(e)e.innerHTML=h}).catch(function(){})},3000);</script>` +
 			`</body></html>`
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		writeResponse(w, http.StatusOK, page)
@@ -157,6 +158,15 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
 		respVersion := `{"api": "0.1", "server": "1.2.3", "text": "OctoPrint 1.2.3/Dummy"}`
 		writeResponse(w, http.StatusOK, respVersion)
+	})
+
+	// /log returns just the colored log rows so the status page can refresh the
+	// log live (the page polls this every few seconds). Fixes the race where a
+	// reload right after an upload shows the log before the upload was recorded.
+	mux.HandleFunc("/log", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		writeResponse(w, http.StatusOK, LogRing.HTML())
 	})
 
 	mux.HandleFunc("/api/files/local", func(w http.ResponseWriter, r *http.Request) {
