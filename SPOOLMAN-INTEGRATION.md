@@ -42,6 +42,7 @@ intern **8000**, SQLite, Container `spoolman` im Netz `dockervolumes_home_net`.
 | 15 | Retention | **alles** in der Ledger-Datei behalten, in der GUI nur die **10** neuesten Zeilen rendern |
 | 16 | Zugriffsschutz | `:8844` bleibt **ohne Auth** (LAN-intern, einheitlich zu Spoolman und dem übrigen Stack). Zustandsänderungen ausschließlich per **POST**, damit kein Link und kein Browser-Prefetch bucht |
 | 17 | Dateien ohne Verbrauchsblock | Luban, `.nc`, Laser/CNC bekommen eine **Zeile ohne Buchung**: Zeitstempel und Dateiname, Filamentspalten leer, Buchen-Button deaktiviert. Kein Rechnen aus den E-Bewegungen |
+| 18 | Restmengen-Spalte | zusätzliche Spalte mit der Restmenge der Rolle **nach dieser Buchung**, im Ledger festgehalten — ändert sich nur, wenn diese Zeile korrigiert wird. Noch **nicht** gebuchte Zeilen zeigen den aktuellen Stand der Rolle (ihre Buchung ist 0, also derselbe Wert); mit dem Buchen friert die Zahl ein. Färbung: unter der Schwelle **orange**, unter 0 **rot und fett**. Schwelle per Env `SPOOLMAN_LOW_G`, Standard **100 g** |
 
 ---
 
@@ -57,6 +58,13 @@ intern **8000**, SQLite, Container `spoolman` im Netz `dockervolumes_home_net`.
 - `PATCH /spool/{id}` kann `used_weight` **absolut** setzen (`minimum: 0`), Alternative zum Delta.
 - Spoolman hat **keine Buchungshistorie** — nur `used_weight`, `first_used`, `last_used`.
   → Wer „welcher Auftrag hat wie viel gebucht" wissen will, muss es selbst führen.
+- ⚠️ **`remaining_weight` ist bei Spoolman auf ≥ 0 geklemmt**: `api/v1/models.py:328` rechnet
+  `max(initial_weight - used_weight, 0)`, und das Feld ist mit `ge=0` deklariert. Eine überbuchte
+  Rolle ist daran also **nicht** erkennbar. → Restmenge selbst aus `initial_weight - used_weight`
+  rechnen (Rückfall auf `filament.weight`, wenn die Rolle kein eigenes Nettogewicht hat — dieselbe
+  Reihenfolge nutzt Spoolman intern), damit negative Werte sichtbar werden.
+- `PUT /spool/{id}/use` **liefert den aktualisierten Spool zurück** → die neue Restmenge lässt sich
+  direkt aus der Buchungsantwort rechnen und einfrieren, ohne zusätzlichen `GET`.
 - Eigene Felder sind anlegbar: `GET/POST /field/{entity_type}/{key}` (für das Preset-Mapping).
 - Weitere relevante Endpunkte: `GET/POST /filament`, `GET/POST /spool`, `GET /vendor`,
   `PUT /spool/{id}/measure`, `GET /external/filament`.
@@ -93,7 +101,8 @@ intern **8000**, SQLite, Container `spoolman` im Netz `dockervolumes_home_net`.
 Ohne eigenen Datensatz ist „80 → 60 = −20" und ein idempotenter Storno nicht möglich.
 Pro Zeile mindestens: Upload-ID (klammert die Slots eines Auftrags), Zeitstempel, Dateiname,
 Dateigröße, Slot-Index/Tool, Preset-Name, Farbe, Typ, Dichte, Durchmesser, `gcode_g`, `gcode_mm`,
-`booked_g`, `spool_id`, Status (`offen` | `gebucht` | `fehler`), Buchungszeitpunkt, Fehlertext.
+`booked_g`, `remaining_after_g` (Restmenge nach dieser Buchung, aus der Antwort des `use`-Aufrufs),
+`spool_id`, Status (`offen` | `gebucht` | `fehler`), Buchungszeitpunkt, Fehlertext.
 
 **Regeln**
 
