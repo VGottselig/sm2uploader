@@ -31,7 +31,7 @@ intern **8000**, SQLite, Container `spoolman` im Netz `dockervolumes_home_net`.
 | 4 | Zuordnung Filament→Rolle | automatisch über den Orca-Preset-Namen, gepflegt als **`extra`-Feld an der Spoolman-Rolle**; bei mehreren Treffern die **zuletzt benutzte, nicht archivierte** Rolle |
 | 5 | Fehlendes Filament | **automatisch anlegen** — Filament *und* (bei Bedarf) Rolle, mit 1000 g Nettogewicht und allen aus dem G-Code bekannten Werten. **Hersteller direkt aus `filament_vendor`** (steht seit der Preset-Korrektur vom 30.07.2026 korrekt auf `DEEPLEE`) — keine Heuristik. Leergewicht (Tare) bleibt leer, der G-Code kennt es nicht |
 | 6 | Buchungseinheit | **Gramm** (`use_weight`), **ganze Gramm ohne Nachkommastelle** — der G-Code-Wert wird **einmal beim Parsen** gerundet, danach sind Ledger, Anzeige und Buchung durchgängig ganzzahlig (sonst erzeugt „46" bei intern gebuchten 45,9 ein Delta von +0,1). Zeitstempel in `Europe/Berlin`. Dichte/Durchmesser beim Anlegen aus dem G-Code übernehmen, damit Spoolman und Orca gleich rechnen |
-| 7 | Spalten | Zeit, Datei, Tool, Filament, **G-Code g (readonly)**, **gebucht g (editierbar)**, Druckzeit, Kosten, Status. Die Menge steht bewusst **zweimal**: links der unveränderliche Wert aus dem G-Code, rechts der bei Spoolman verbuchte. „Buchen" = rechten Wert auf den linken setzen |
+| 7 | Spalten | Zeit, Datei, Tool, Filament, **G-Code g (readonly)**, **gebucht g (editierbar)**, Druckzeit, Kosten, Status. Die Menge steht bewusst **zweimal**: links der unveränderliche Wert aus dem G-Code, rechts der bei Spoolman verbuchte. „Buchen" = rechten Wert auf den linken setzen. In der Filament-Spalte ein **Farbkästchen vor dem Namen** (aus `filament_colour`, `background:#RRGGBB`, inline; keine eigene Spalte) |
 | 8 | Buchungszeitpunkt | **sofort**, sobald Upload *und* Startbefehl erfolgreich durch sind. Schlägt der Start fehl, wird **nicht** gebucht — die Zeile bleibt offen |
 | 9 | Korrektur / Storno | **kein eigener Storno-Zustand.** Pro Zeile gibt es einen Wert; jede Änderung schickt die **Differenz zum bereits gebuchten Betrag** an Spoolman (gebucht 120, korrigiert auf 50 → `use_weight: +70`). „Stornieren" = Wert auf 0, „buchen" = Wert auf den G-Code-Wert. Bewusst in Kauf genommen: eine auf 0 korrigierte Zeile ist nicht von einer nie gebuchten unterscheidbar |
 | 10 | Doppel-Upload | alle Uploads **gleich** behandeln — keine Wiederholungserkennung, keine Markierung. Reiner Upload bucht nichts |
@@ -107,6 +107,9 @@ intern **8000**, SQLite, Container `spoolman` im Netz `dockervolumes_home_net`.
   unten `key = wert`. `filament_density` steht in **beiden**. Nur `=` erkennen → der untere Block
   gewinnt, und der hat alles Nötige.
 - Arrays sind **index-parallel**, Index `i` = Tool `T{i}`; nur Slots mit Wert > 0 wurden gedruckt.
+- `filament_colour[i]` liefert `#RRGGBB` für das Farbkästchen. Weiß (`#FFFFFF`, z. B. „PLA+ Weiß")
+  braucht einen dünnen Rahmen, sonst verschwindet der Fleck auf hellem Grund — die GUI ist aber
+  dunkel (`#1b1b1d`), daher unkritisch; trotzdem einen 1px-Rahmen setzen.
 - **Delimiter sind uneinheitlich**: Zahlen-Arrays per Komma, String-Arrays per **Semikolon**,
   `filament_settings_id` zusätzlich in Anführungszeichen. Details in `GCODE-FILAMENT.md`.
 
