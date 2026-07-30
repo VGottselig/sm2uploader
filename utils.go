@@ -10,12 +10,32 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/macdylan/SMFix/fix"
 )
 
 type empty struct{}
+
+var (
+	berlinOnce sync.Once
+	berlin     *time.Location
+)
+
+// berlinLoc is the timestamp zone for the upload ledger and the GUI. The
+// container has no TZ set, so the zone is named explicitly; time/tzdata is
+// embedded in main.go so this also works on images without zoneinfo.
+func berlinLoc() *time.Location {
+	berlinOnce.Do(func() {
+		if loc, err := time.LoadLocation("Europe/Berlin"); err == nil {
+			berlin = loc
+		} else {
+			berlin = time.Local
+		}
+	})
+	return berlin
+}
 
 func humanReadableSize(size int64) string {
 	const unit = 1024

@@ -4,3 +4,4 @@ dist/
 go.work*
 docker-compose.yml
 sm2uploader
+sm2uploader-patched*

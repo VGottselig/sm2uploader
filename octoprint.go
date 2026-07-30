@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,8 +21,20 @@ const (
 	maxMemory = 64 << 20 // 64MB
 )
 
+// pollScript keeps the log and the upload table current without a manual reload.
+// The table swap is skipped while the focus sits inside it -- otherwise the poll
+// would overwrite a gram correction the user is still typing.
+const pollScript = `
+function sm2swap(url,sel,guard){fetch(url,{cache:'no-store'}).then(function(r){return r.text()}).then(function(h){
+var e=document.querySelector(sel);if(!e)return;
+if(guard&&e.contains(document.activeElement))return;
+e.innerHTML=h}).catch(function(){})}
+setInterval(function(){sm2swap('/log','.log',false)},3000);
+setInterval(function(){sm2swap('/uploads','#uploads',true)},5000);
+`
+
 const pageCSS = `
-body{background:#1b1b1d;color:#e0e0e0;font:14px/1.5 system-ui,"Segoe UI",Roboto,sans-serif;margin:0;padding:18px;max-width:920px}
+body{background:#1b1b1d;color:#e0e0e0;font:14px/1.5 system-ui,"Segoe UI",Roboto,sans-serif;margin:0;padding:18px;max-width:1280px}
 h1{font-size:19px;margin:0 0 2px}h1 .ver{color:#6b7280;font-size:13px;font-weight:400}
 h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:#9ca3af;margin:22px 0 8px}
 h2 .hint{text-transform:none;letter-spacing:0;font-weight:400;color:#6b7280}
@@ -38,6 +51,25 @@ h2 .hint{text-transform:none;letter-spacing:0;font-weight:400;color:#6b7280}
 .log{background:#141416;border-radius:8px;padding:12px 14px;font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;overflow:auto;max-height:60vh}
 .log span{display:block;white-space:pre-wrap;word-break:break-word}
 .log-err{color:#f87171}.log-ok{color:#4ade80}.log-info{color:#c3c7cf}
+#uploads{overflow-x:auto}
+.tbl{border-collapse:collapse;width:100%;font-size:13px}
+.tbl th{text-align:left;font-weight:500;color:#9ca3af;border-bottom:1px solid #383840;padding:6px 8px;white-space:nowrap}
+.tbl td{border-bottom:1px solid #2a2a30;padding:5px 8px;vertical-align:middle}
+.tbl tr:hover td{background:#232327}
+.tbl .num{text-align:right;font-variant-numeric:tabular-nums}
+.tbl .nw{white-space:nowrap}
+.tbl .file{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tbl .dim{color:#6b7280}
+.tbl .warn{color:#fbbf24}
+.tbl .neg{color:#f87171;font-weight:700}
+.tbl .st-err{color:#f87171;cursor:help;margin-left:5px;font-weight:700}
+.sw{display:inline-block;width:11px;height:11px;border-radius:2px;border:1px solid #6b7280;margin-right:6px;vertical-align:-1px}
+.tbl input.g{width:62px;background:#1b1b1d;color:#e0e0e0;border:1px solid #4b5563;border-radius:4px;padding:3px 5px;font-size:13px;text-align:right}
+.tbl .act{white-space:nowrap}
+.tbl .act button{background:#374151;color:#e5e7eb;border:0;border-radius:5px;padding:4px 9px;font-size:12px;cursor:pointer;margin-right:4px}
+.tbl .act button:hover{background:#4b5563}
+.tbl .act button.danger:hover{background:#991b1b}
+.empty{color:#6b7280;font-size:13px;margin:0}
 `
 
 var (
@@ -129,11 +161,11 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		}
 		banner := ""
 		if ok := r.URL.Query().Get("ok"); ok != "" {
-			banner = `<div class="banner banner-ok">Hochgeladen: ` + html.EscapeString(ok) + `</div>`
+			banner = `<div class="banner banner-ok">` + html.EscapeString(ok) + `</div>`
 		} else if e := r.URL.Query().Get("err"); e != "" {
-			banner = `<div class="banner banner-err">Fehler: ` + html.EscapeString(e) + `</div>`
+			banner = `<div class="banner banner-err">Error: ` + html.EscapeString(e) + `</div>`
 		}
-		page := `<!doctype html><html lang="de"><head><meta charset="utf-8">` +
+		page := `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
 			`<meta name="viewport" content="width=device-width,initial-scale=1">` +
 			`<title>sm2uploader</title><style>` + pageCSS + `</style></head><body>` +
 			`<h1>sm2uploader <span class="ver">` + html.EscapeString(Version) + `</span></h1>` +
@@ -143,13 +175,15 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			`<form class="upload" method="POST" action="/api/files/local" enctype="multipart/form-data">` +
 			`<input type="hidden" name="gui" value="1">` +
 			`<input type="file" name="file" accept=".gcode,.gco,.g,.nc" required>` +
-			`<label><input type="checkbox" name="print" value="true"> Druck sofort starten</label>` +
-			`<button type="submit">Hochladen</button>` +
+			`<label><input type="checkbox" name="print" value="true"> Start print immediately</label>` +
+			`<button type="submit">Upload</button>` +
 			`</form>` +
+			`<h2>Uploads <span class="hint">` + uploadsHint() + `</span></h2>` +
+			`<div id="uploads">` + uploadsHTML() + `</div>` +
 			`<h2>Status</h2><pre class="stats">` + html.EscapeString(_stats.StatsText()) + `</pre>` +
-			`<h2>Log <span class="hint">(neueste oben, aktualisiert automatisch)</span></h2>` +
+			`<h2>Log <span class="hint">(newest first, auto-refreshing)</span></h2>` +
 			`<div class="log">` + LogRing.HTML() + `</div>` +
-			`<script>setInterval(function(){fetch('/log',{cache:'no-store'}).then(function(r){return r.text()}).then(function(h){var e=document.querySelector('.log');if(e)e.innerHTML=h}).catch(function(){})},3000);</script>` +
+			`<script>` + pollScript + `</script>` +
 			`</body></html>`
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		writeResponse(w, http.StatusOK, page)
@@ -167,6 +201,51 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		writeResponse(w, http.StatusOK, LogRing.HTML())
+	})
+
+	// /uploads returns just the upload table so the page can refresh it live,
+	// same pattern as /log above.
+	mux.HandleFunc("/uploads", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		writeResponse(w, http.StatusOK, uploadsHTML())
+	})
+
+	// /book changes inventory in Spoolman, so it is POST only: no link and no
+	// browser prefetch can ever book something.
+	mux.HandleFunc("/book", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowedResponse(w, r.Method)
+			return
+		}
+		id := r.FormValue("id")
+		row, ok := TheLedger.Get(id)
+		if !ok {
+			http.Redirect(w, r, "/?err="+url.QueryEscape("unknown row "+id), http.StatusSeeOther)
+			return
+		}
+
+		target := row.BookedG
+		switch r.FormValue("action") {
+		case "book":
+			target = row.GcodeG // "book" = set the right value to the left one
+		case "cancel":
+			target = 0
+		default:
+			v, err := strconv.Atoi(strings.TrimSpace(r.FormValue("g")))
+			if err != nil {
+				http.Redirect(w, r, "/?err="+url.QueryEscape("invalid gram value"), http.StatusSeeOther)
+				return
+			}
+			target = v
+		}
+
+		if err := BookRow(id, target); err != nil {
+			log.Printf("Booking failed for %s: %s", id, err)
+			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+			return
+		}
+		http.Redirect(w, r, "/?ok="+url.QueryEscape(fmt.Sprintf("%s T%d: %d g booked", row.File, row.Slot, target)), http.StatusSeeOther)
 	})
 
 	mux.HandleFunc("/api/files/local", func(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +268,16 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			return
 		}
 		defer file.Close()
+
+		// Read the filament consumption from the tail of the ORIGINAL upload,
+		// before SMFix touches it. ParseGcodeUse rewinds the reader, so the
+		// uploader below still sees the whole file. A file without a consumption
+		// block (Luban, .nc, laser/CNC) yields HasBlock=false and gets a row
+		// without a booking.
+		gcodeUse, perr := ParseGcodeUse(file)
+		if perr != nil {
+			log.Printf("Warning: could not read the consumption block of '%s': %s", fd.Filename, perr)
+		}
 
 		// read X-Api-Key header
 		apiKey := r.Header.Get("X-Api-Key")
@@ -239,7 +328,16 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			log.Printf("Print start requested (print=%q)", r.FormValue("print"))
 		}
 		gui := r.FormValue("gui") == "1"
-		if err := Connector.Upload(printer, payload, startRequested); err != nil {
+		err = Connector.Upload(printer, payload, startRequested)
+
+		// Only a successful upload produces a ledger row -- but "upload landed,
+		// start failed" counts as successful here: the file is on the printer, so
+		// the row exists and stays open instead of being booked.
+		if payload.Uploaded {
+			RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started)
+		}
+
+		if err != nil {
 			_stats.addFailure(payload.Name, payload.Size)
 			if gui {
 				http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
@@ -254,7 +352,7 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		log.Printf("Upload finished: %s [%s]", fd.Filename, payload.ReadableSize())
 
 		if gui {
-			http.Redirect(w, r, "/?ok="+url.QueryEscape(fd.Filename), http.StatusSeeOther)
+			http.Redirect(w, r, "/?ok="+url.QueryEscape("Uploaded: "+fd.Filename), http.StatusSeeOther)
 			return
 		}
 		// Return success response

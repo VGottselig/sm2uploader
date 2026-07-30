@@ -28,6 +28,13 @@ type Payload struct {
 	Size      int64
 	FixedFile string // path to the fixed (processed) file for streaming upload
 	Print     bool   // when true, upload via /prepare_print and start the job (Luban behavior)
+
+	// Uploaded/Started report how far a (possibly failed) upload actually got.
+	// Upload() collapses everything into one error, but the consumption ledger
+	// needs the difference: the file may well be on the printer while only the
+	// start failed -- that gets a row without a booking.
+	Uploaded bool
+	Started  bool
 }
 
 func (p *Payload) SetName(name string) {
@@ -149,6 +156,14 @@ func (c *connector) Upload(printer *Printer, payload *Payload, start bool) error
 			payload.Print = start
 			if err := h.Upload(payload); err != nil {
 				return err
+			}
+
+			// A nil error means the handler got all the way through. Handlers
+			// that can fail partway (HTTP: prepare_print ok, start_print not)
+			// set these themselves.
+			payload.Uploaded = true
+			if start {
+				payload.Started = true
 			}
 
 			// Return nil if successful
