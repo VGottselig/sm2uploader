@@ -25,12 +25,19 @@ const (
 // The table swap is skipped while the focus sits inside it -- otherwise the poll
 // would overwrite a gram correction the user is still typing.
 const pollScript = `
-function sm2swap(url,sel,guard){fetch(url,{cache:'no-store'}).then(function(r){return r.text()}).then(function(h){
+function sm2act(inp){var v=parseInt(inp.value||'0',10);if(isNaN(v))v=0;var g=parseInt(inp.dataset.g||'0',10);if(isNaN(g))g=0;
+var a=(v===0)?'book':(v===g?'cancel':'set');
+var f=document.getElementById(inp.getAttribute('form'));if(!f)return;
+f.querySelectorAll('button[data-act]').forEach(function(btn){btn.style.display=(btn.dataset.act===a)?'':'none'})}
+function sm2acts(){document.querySelectorAll('.tbl input.g').forEach(sm2act)}
+function sm2swap(url,sel,guard,after){fetch(url,{cache:'no-store'}).then(function(r){return r.text()}).then(function(h){
 var e=document.querySelector(sel);if(!e)return;
 if(guard&&e.contains(document.activeElement))return;
-e.innerHTML=h}).catch(function(){})}
+e.innerHTML=h;if(after)after()}).catch(function(){})}
+document.addEventListener('input',function(e){if(e.target&&e.target.classList&&e.target.classList.contains('g'))sm2act(e.target)});
 setInterval(function(){sm2swap('/log','.log',false)},3000);
-setInterval(function(){sm2swap('/uploads','#uploads',true)},5000);
+setInterval(function(){sm2swap('/uploads','#uploads',true,sm2acts)},5000);
+sm2acts();
 `
 
 const pageCSS = `
