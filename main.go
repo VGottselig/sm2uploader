@@ -11,6 +11,10 @@ import (
 	"syscall"
 	"time"
 
+	// Embedded zone data so the ledger's Europe/Berlin timestamps work on any
+	// base image, including ones without /usr/share/zoneinfo.
+	_ "time/tzdata"
+
 	"github.com/manifoldco/promptui"
 )
 
@@ -27,6 +31,8 @@ var (
 	NoFix               bool
 	Debug               bool
 	OutputDir           string
+	SpoolmanURL         string
+	UploadsFile         string
 
 	_Payloads       []*Payload
 	SmFixExtensions = map[string]bool{
@@ -66,10 +72,25 @@ func main() {
 	flag.BoolVar(&NoFix, "nofix", parseBoolEnv("NOFIX", false), "disable SMFix(built-in)")
 	flag.BoolVar(&StartAfterUpload, "start", parseBoolEnv("START", false), "start printing after upload (octoprint also honors slicer print=true)")
 	flag.StringVar(&OutputDir, "output", os.Getenv("OUTPUT_DIR"), "output directory to save original and fixed files")
+	flag.StringVar(&SpoolmanURL, "spoolman", os.Getenv("SPOOLMAN_URL"), "Spoolman base url, e.g. 'http://spoolman:8000'. Empty disables filament bookings.")
+	flag.StringVar(&UploadsFile, "uploads", os.Getenv("UPLOADS_FILE"), "upload ledger file (default: uploads.yaml next to -knownhosts)")
+	flag.IntVar(&SpoolmanLowG, "lowg", parseIntEnv("SPOOLMAN_LOW_G", 100), "warn below this remaining spool weight in grams")
 	flag.BoolVar(&Debug, "debug", parseBoolEnv("DEBUG", false), "debug mode")
 
 	flag.Usage = flag_usage
 	flag.Parse()
+
+	// Default the ledger next to the known hosts file, so it lands in the
+	// persistent /data volume without another compose change.
+	if UploadsFile == "" {
+		UploadsFile = filepath.Join(filepath.Dir(KnownHosts), "uploads.yaml")
+	}
+	TheLedger = LoadLedger(UploadsFile)
+	if TheSpoolman = NewSpoolman(SpoolmanURL); TheSpoolman != nil {
+		log.Printf("Spoolman: %s (warn below %d g)", SpoolmanURL, SpoolmanLowG)
+	} else {
+		log.Printf("Spoolman not configured -- uploads are only recorded, never booked")
+	}
 
 	if Debug {
 		log.Printf("-- Debug mode: %s", Version)

@@ -212,6 +212,10 @@ func (hc *HTTPConnector) Upload(payload *Payload) (err error) {
 		if _, err = r.Post(hc.URL("/prepare_print")); err != nil {
 			return
 		}
+		// The file is on the printer from here on. Recorded separately from the
+		// start so the consumption ledger can tell "uploaded but not started"
+		// (row stays open, nothing booked) from a failed upload (no row at all).
+		payload.Uploaded = true
 		log.SetOutput(LogOut)
 		log.Printf("Print job prepared")
 		err = hc.StartPrint()
@@ -219,8 +223,13 @@ func (hc *HTTPConnector) Upload(payload *Payload) (err error) {
 		if err == nil {
 			err = hc.verifyLoaded(payload.Name)
 		}
+		if err == nil {
+			payload.Started = true
+		}
 	} else {
-		_, err = r.Post(hc.URL("/upload"))
+		if _, err = r.Post(hc.URL("/upload")); err == nil {
+			payload.Uploaded = true
+		}
 	}
 	return
 }
