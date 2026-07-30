@@ -30,8 +30,8 @@ intern **8000**, SQLite, Container `spoolman` im Netz `dockervolumes_home_net`.
 | 3 | Tabelle | **eine Zeile pro (Upload × Slot)**, flach, neueste oben |
 | 4 | Zuordnung Filament→Rolle | automatisch über den Orca-Preset-Namen, gepflegt als **`extra`-Feld an der Spoolman-Rolle**; bei mehreren Treffern die **zuletzt benutzte, nicht archivierte** Rolle |
 | 5 | Fehlendes Filament | **automatisch anlegen** — Filament *und* (bei Bedarf) Rolle, mit 1000 g Nettogewicht und allen aus dem G-Code bekannten Werten |
-| 6 | Buchungseinheit | *(Annahme, noch nicht bestätigt)* **Gramm**; Dichte/Durchmesser beim Anlegen aus dem G-Code übernehmen, damit Spoolman und Orca gleich rechnen |
-| 7 | Zusatzspalten | *(Annahme, noch nicht bestätigt)* Druckzeit und Kosten aus dem G-Code-Block mitanzeigen |
+| 6 | Buchungseinheit | **Gramm** (`use_weight`), eine Dezimalstelle, Zeitstempel in `Europe/Berlin`. Dichte/Durchmesser beim Anlegen aus dem G-Code übernehmen, damit Spoolman und Orca gleich rechnen |
+| 7 | Spalten | Zeit, Datei, Tool, Filament, **G-Code g (readonly)**, **gebucht g (editierbar)**, Druckzeit, Kosten, Status. Die Menge steht bewusst **zweimal**: links der unveränderliche Wert aus dem G-Code, rechts der bei Spoolman verbuchte. „Buchen" = rechten Wert auf den linken setzen |
 | 8 | Buchungszeitpunkt | **sofort**, sobald Upload *und* Startbefehl erfolgreich durch sind. Schlägt der Start fehl, wird **nicht** gebucht — die Zeile bleibt offen |
 | 9 | Korrektur / Storno | **kein eigener Storno-Zustand.** Pro Zeile gibt es einen Wert; jede Änderung schickt die **Differenz zum bereits gebuchten Betrag** an Spoolman (gebucht 120, korrigiert auf 50 → `use_weight: +70`). „Stornieren" = Wert auf 0, „buchen" = Wert auf den G-Code-Wert. Bewusst in Kauf genommen: eine auf 0 korrigierte Zeile ist nicht von einer nie gebuchten unterscheidbar |
 | 10 | Doppel-Upload | alle Uploads **gleich** behandeln — keine Wiederholungserkennung, keine Markierung. Reiner Upload bucht nichts |
@@ -39,6 +39,9 @@ intern **8000**, SQLite, Container `spoolman` im Netz `dockervolumes_home_net`.
 | 12 | Rollen | genau **eine Rolle pro Sorte** → Zuordnung ist eindeutig, **kein** Rollen-Dropdown in der Tabelle, nur der Gramm-Wert ist editierbar. Rollentausch pflegt der Anwender in Spoolman (auf 1000 g stellen) |
 | 13 | Restmengen-Warnung | Bedarf gegen `remaining_weight` prüfen und warnen — **nur bei Upload + Start**, nicht bei reinem Upload. Nie blockieren |
 | 14 | Abgebrochene Drucke | rein **manuelle** Korrektur des Werts. Kein Fortschritts-Poll am Drucker |
+| 15 | Retention | **alles** in der Ledger-Datei behalten, in der GUI nur die **10** neuesten Zeilen rendern |
+| 16 | Zugriffsschutz | `:8844` bleibt **ohne Auth** (LAN-intern, einheitlich zu Spoolman und dem übrigen Stack). Zustandsänderungen ausschließlich per **POST**, damit kein Link und kein Browser-Prefetch bucht |
+| 17 | Dateien ohne Verbrauchsblock | Luban, `.nc`, Laser/CNC bekommen eine **Zeile ohne Buchung**: Zeitstempel und Dateiname, Filamentspalten leer, Buchen-Button deaktiviert. Kein Rechnen aus den E-Bewegungen |
 
 ---
 
@@ -107,7 +110,7 @@ Dateigröße, Slot-Index/Tool, Preset-Name, Farbe, Typ, Dichte, Durchmesser, `gc
   HA). Kein Fortschritts-Poll.
 - **Auth**: `:8844` und `:7912` sind im LAN ohne Schutz. Die neuen Endpunkte ändern Inventar →
   ausschließlich POST, kein Zustandswechsel per GET (CSRF/Prefetch).
-- **Retention**: alles behalten, aber nur die letzten ~100 Zeilen rendern.
+- **Retention**: alles behalten, aber nur die 10 neuesten Zeilen rendern.
 
 **Tests** (Repo hat bisher keine): Unit-Tests für den Parser — Komma- vs. Semikolon-Delimiter,
 quoted Strings, **Semikolon im Filamentnamen**, 1 vs. 4 Slots, fehlende `filament used`-Zeilen,
@@ -146,11 +149,7 @@ Beim Prüfen in Orca relevant, weil diese Werte in Spoolman übernommen werden:
 - `filament_density` und `filament_diameter` — stimmen sie nicht, rechnen Orca und Spoolman
   auseinander
 
-### Noch nicht entschieden
+### Sonst alles geklärt
 
-- Buchungseinheit **Gramm** bestätigen, dazu Rundung (eine Dezimalstelle?) und Zeitzone der
-  Zeitstempel (`Europe/Berlin`)
-- Zusatzspalten **Druckzeit / Kosten** bestätigen
-- **Retention**: wie viele Zeilen anzeigen, wie viele behalten
-- **Zugriffsschutz** auf `:8844` — die neuen Endpunkte ändern Inventar, aktuell ohne jede Auth
-- Verhalten bei Dateien **ohne Verbrauchsblock** (Luban, `.nc`, Laser/CNC)
+Die Punkte 1–17 in Abschnitt 2 sind entschieden. Offen ist **nur** das Hersteller-Feld oben —
+sobald das geklärt ist, kann geplant und implementiert werden.
