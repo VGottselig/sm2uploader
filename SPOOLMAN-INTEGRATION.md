@@ -118,6 +118,23 @@ Dateigröße, Slot-Index/Tool, Preset-Name, Farbe, Typ, Dichte, Durchmesser, `gc
 `booked_g`, `remaining_after_g` (Restmenge nach dieser Buchung, aus der Antwort des `use`-Aufrufs),
 `spool_id`, Status (`offen` | `gebucht` | `fehler`), Buchungszeitpunkt, Fehlertext.
 
+**Format und Schreibweise** (Entscheidung):
+
+- **`/data/uploads.yaml`**, geschrieben mit `gopkg.in/yaml.v3` — schon Abhängigkeit (`localstorage.go`),
+  keine neue. Einheitlich zu `hosts.yaml`, im Editor lesbar und reparierbar. Bei „alles behalten"
+  wächst die Datei ~300 B/Zeile (1000 Drucke ≈ 300 KB) — komplettes Neuschreiben je Änderung ist
+  bei der Größe unkritisch.
+- **Atomar schreiben**: in `uploads.yaml.tmp` schreiben, `fsync`, dann `os.Rename` über die Zieldatei.
+  ⚠️ Das bestehende `LocalStorage.Save()` (`localstorage.go:74-78`) nutzt `os.WriteFile` — truncate
+  dann schreiben, **nicht atomar**; ein Absturz mitten im Schreiben zerstört die Datei. Für ein
+  Verbrauchs-Ledger vermeiden. (Optional denselben atomaren Weg auch für `hosts.yaml` nachziehen.)
+- **Ein `sync.Mutex`** um Lesen-Ändern-Schreiben. Nötig, weil der OctoPrint-Server auf `http.Serve`
+  läuft und **jede Anfrage in einer eigenen Goroutine** bedient: ein Orca-Upload (hängt Zeile an)
+  und ein „buchen"-Klick im Browser (ändert Zeile) können echt gleichzeitig auftreten und sich
+  sonst gegenseitig überschreiben. (Der bestehende `_stats`-Zähler in `octoprint.go` ist bereits
+  ungeschützt — hier nicht wiederholen.)
+- **Beim Start** einmal einlesen, im Speicher halten, nach jeder Änderung ganz zurückschreiben.
+
 **Regeln**
 
 - Alle Spoolman-Writes sind **Deltas gegen `booked_g`** — nie absolute Werte aus der Tabelle.
