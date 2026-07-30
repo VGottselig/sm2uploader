@@ -158,13 +158,12 @@ func (c *connector) Upload(printer *Printer, payload *Payload, start bool) error
 				return err
 			}
 
-			// A nil error means the handler got all the way through. Handlers
-			// that can fail partway (HTTP: prepare_print ok, start_print not)
-			// set these themselves.
+			// A nil error means the file reached the printer. Started is left to
+			// the handler on purpose: the HTTP handler confirms a real start (the
+			// upload can succeed while the start is rejected), and SACP/Moonraker
+			// don't start at all -- so a start request there must not be booked as
+			// started.
 			payload.Uploaded = true
-			if start {
-				payload.Started = true
-			}
 
 			// Return nil if successful
 			return nil

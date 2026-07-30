@@ -135,8 +135,26 @@ func (hc *HTTPConnector) Home() (err error) {
 
 func (hc *HTTPConnector) StartPrint() (err error) {
 	log.Printf("Starting print job...")
-	_, err = hc.request(120).Post(hc.URL("/start_print"))
-	return
+	resp, err := hc.request(120).Post(hc.URL("/start_print"))
+	if err != nil {
+		return err
+	}
+	return httpReject("start_print", resp)
+}
+
+// httpReject turns a 4xx/5xx printer response into an error. imroc/req only
+// sets err on transport failures, so a rejection (printer not ready, or a
+// stale/expired session answering 401 "Machine is not connected") otherwise
+// passes as success -- which let a print that never started be logged as done
+// and its filament booked. The printer's own message becomes the error text.
+func httpReject(what string, resp *req.Response) error {
+	if resp != nil && resp.IsErrorState() {
+		if body := strings.TrimSpace(resp.String()); body != "" {
+			return fmt.Errorf("%s rejected: HTTP %d: %s", what, resp.StatusCode, body)
+		}
+		return fmt.Errorf("%s rejected: HTTP %d", what, resp.StatusCode)
+	}
+	return nil
 }
 
 func (hc *HTTPConnector) Upload(payload *Payload) (err error) {
@@ -209,7 +227,12 @@ func (hc *HTTPConnector) Upload(payload *Payload) (err error) {
 	// call /start_print with the token only. A plain upload just stores the file.
 	if payload.Print {
 		r.SetFormData(map[string]string{"type": "3DP"})
-		if _, err = r.Post(hc.URL("/prepare_print")); err != nil {
+		resp, perr := r.Post(hc.URL("/prepare_print"))
+		if perr != nil {
+			err = perr
+			return
+		}
+		if err = httpReject("prepare_print", resp); err != nil {
 			return
 		}
 		// The file is on the printer from here on. Recorded separately from the
@@ -227,7 +250,10 @@ func (hc *HTTPConnector) Upload(payload *Payload) (err error) {
 			payload.Started = true
 		}
 	} else {
-		if _, err = r.Post(hc.URL("/upload")); err == nil {
+		resp, perr := r.Post(hc.URL("/upload"))
+		if perr != nil {
+			err = perr
+		} else if err = httpReject("upload", resp); err == nil {
 			payload.Uploaded = true
 		}
 	}
