@@ -43,6 +43,8 @@ intern **8000**, SQLite, Container `spoolman` im Netz `dockervolumes_home_net`.
 | 16 | Zugriffsschutz | `:8844` bleibt **ohne Auth** (LAN-intern, einheitlich zu Spoolman und dem übrigen Stack). Zustandsänderungen ausschließlich per **POST**, damit kein Link und kein Browser-Prefetch bucht |
 | 17 | Dateien ohne Verbrauchsblock | Luban, `.nc`, Laser/CNC bekommen eine **Zeile ohne Buchung**: Zeitstempel und Dateiname, Filamentspalten leer, Buchen-Button deaktiviert. Kein Rechnen aus den E-Bewegungen |
 | 18 | Restmengen-Spalte | zusätzliche Spalte mit der Restmenge der Rolle **nach dieser Buchung**, im Ledger festgehalten — ändert sich nur, wenn diese Zeile korrigiert wird. Noch **nicht** gebuchte Zeilen zeigen den aktuellen Stand der Rolle (ihre Buchung ist 0, also derselbe Wert); mit dem Buchen friert die Zahl ein. Färbung: unter der Schwelle **orange**, unter 0 **rot und fett**. Schwelle per Env `SPOOLMAN_LOW_G`, Standard **100 g** |
+| 19 | Rollen-Preis beim Anlegen | aus dem G-Code ermitteln: `filament_cost[i]` (Orca: Preis pro **kg**) × Nettogewicht ⁄ 1000 → als `price` an der Rolle. Fehlt `filament_cost` im Block: bei **genau einem** benutzten Slot aus `total filament cost` ⁄ `total filament used [g]` × 1000 herleiten; bei mehreren Slots nicht zurechenbar → Preis leer lassen. *Vorbehalt: ob `filament_cost` im Block steht, wird beim G-Code-Gegencheck geprüft* |
+| 20 | Kosten-Spalte | rechnet aus **Spoolman-Daten**, nicht aus dem G-Code: `gebucht_g × Preis ⁄ Nettogewicht`. Preisquelle in dieser Reihenfolge: `spool.price` → `filament.price` (die API liefert **keinen** Fallback, siehe Abschnitt 3), analog Nettogewicht `spool.initial_weight` → `filament.weight`. Fehlt der Preis → Spalte leer. Währung aus `GET /setting/currency`. Folge: die Kosten folgen dem **gebuchten** Wert — korrigierst du 120 auf 50, sinken sie mit |
 
 ---
 
@@ -65,6 +67,12 @@ intern **8000**, SQLite, Container `spoolman` im Netz `dockervolumes_home_net`.
   Reihenfolge nutzt Spoolman intern), damit negative Werte sichtbar werden.
 - `PUT /spool/{id}/use` **liefert den aktualisierten Spool zurück** → die neue Restmenge lässt sich
   direkt aus der Buchungsantwort rechnen und einfrieren, ohne zusätzlichen `GET`.
+- **Kein Preis-Fallback in der API**: `api/v1/models.py:354` setzt `price=item.price` für die Rolle,
+  `:219` dasselbe für das Filament — zwei getrennte Felder, Spoolman verkettet sie nicht.
+  Die Reihenfolge `spool.price` → `filament.price` muss der Client selbst bilden.
+- **Währung** kommt aus `GET /setting/currency` (hier `EUR`, `is_set: false`, also Default).
+  ⚠️ Der Wert ist **doppelt JSON-kodiert** (`{"value": "\"EUR\""}`) und muss entpackt werden.
+  Es gibt dort auch `round_prices` — brauchen wir nicht, gerundet wird selbst.
 - Eigene Felder sind anlegbar: `GET/POST /field/{entity_type}/{key}` (für das Preset-Mapping).
 - Weitere relevante Endpunkte: `GET/POST /filament`, `GET/POST /spool`, `GET /vendor`,
   `PUT /spool/{id}/measure`, `GET /external/filament`.
@@ -160,6 +168,12 @@ Beim Prüfen in Orca relevant, weil diese Werte in Spoolman übernommen werden:
   muss eindeutig und stabil sein
 - `filament_density` und `filament_diameter` — stimmen sie nicht, rechnen Orca und Spoolman
   auseinander
+- `filament_cost` — **steht der Schlüssel überhaupt im Kommentarblock?** `GCODE-FILAMENT.md`
+  nennt ihn nur indirekt („`total filament cost` = `filament_cost` × Verbrauch"), belegt ist er
+  nicht. Davon hängt Entscheidung 19 ab: ist er da (Preis pro kg, je Slot), wird der Rollen-Preis
+  direkt daraus gesetzt; fehlt er, bleibt nur die Herleitung aus den beiden Summen-Zeilen, und
+  die funktioniert nur bei einem einzigen benutzten Slot.
+- Preis im Preset überhaupt gepflegt? Steht dort 0, kann auch die Kosten-Spalte nichts zeigen.
 
 ### Sonst alles geklärt
 
