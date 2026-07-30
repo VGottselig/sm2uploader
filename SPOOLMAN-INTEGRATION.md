@@ -30,8 +30,15 @@ intern **8000**, SQLite, Container `spoolman` im Netz `dockervolumes_home_net`.
 | 3 | Tabelle | **eine Zeile pro (Upload × Slot)**, flach, neueste oben |
 | 4 | Zuordnung Filament→Rolle | automatisch über den Orca-Preset-Namen, gepflegt als **`extra`-Feld an der Spoolman-Rolle**; bei mehreren Treffern die **zuletzt benutzte, nicht archivierte** Rolle |
 | 5 | Fehlendes Filament | **automatisch anlegen** — Filament *und* (bei Bedarf) Rolle, mit 1000 g Nettogewicht und allen aus dem G-Code bekannten Werten |
-| 6 | Buchungseinheit | **Gramm**; Dichte/Durchmesser beim Anlegen aus dem G-Code übernehmen, damit Spoolman und Orca gleich rechnen |
-| 7 | Zusatzspalten | Druckzeit und Kosten aus dem G-Code-Block mitanzeigen |
+| 6 | Buchungseinheit | *(Annahme, noch nicht bestätigt)* **Gramm**; Dichte/Durchmesser beim Anlegen aus dem G-Code übernehmen, damit Spoolman und Orca gleich rechnen |
+| 7 | Zusatzspalten | *(Annahme, noch nicht bestätigt)* Druckzeit und Kosten aus dem G-Code-Block mitanzeigen |
+| 8 | Buchungszeitpunkt | **sofort**, sobald Upload *und* Startbefehl erfolgreich durch sind. Schlägt der Start fehl, wird **nicht** gebucht — die Zeile bleibt offen |
+| 9 | Korrektur / Storno | **kein eigener Storno-Zustand.** Pro Zeile gibt es einen Wert; jede Änderung schickt die **Differenz zum bereits gebuchten Betrag** an Spoolman (gebucht 120, korrigiert auf 50 → `use_weight: +70`). „Stornieren" = Wert auf 0, „buchen" = Wert auf den G-Code-Wert. Bewusst in Kauf genommen: eine auf 0 korrigierte Zeile ist nicht von einer nie gebuchten unterscheidbar |
+| 10 | Doppel-Upload | alle Uploads **gleich** behandeln — keine Wiederholungserkennung, keine Markierung. Reiner Upload bucht nichts |
+| 11 | Offene Zeilen | **keine** Erinnerung, kein Zähler. Am Display manuell gestartete Drucke bucht der Anwender über den Button der Zeile |
+| 12 | Rollen | genau **eine Rolle pro Sorte** → Zuordnung ist eindeutig, **kein** Rollen-Dropdown in der Tabelle, nur der Gramm-Wert ist editierbar. Rollentausch pflegt der Anwender in Spoolman (auf 1000 g stellen) |
+| 13 | Restmengen-Warnung | Bedarf gegen `remaining_weight` prüfen und warnen — **nur bei Upload + Start**, nicht bei reinem Upload. Nie blockieren |
+| 14 | Abgebrochene Drucke | rein **manuelle** Korrektur des Werts. Kein Fortschritts-Poll am Drucker |
 
 ---
 
@@ -91,18 +98,13 @@ Dateigröße, Slot-Index/Tool, Preset-Name, Farbe, Typ, Dichte, Durchmesser, `gc
 - **Spoolman offline darf den Druck nicht blockieren.** Buchung erst nach erfolgreichem Upload;
   Fehler nur loggen, Zeile auf `fehler` + Retry. Die Antwort an Orca bleibt unberührt.
 - Nur **erfolgreiche** Uploads erzeugen eine Zeile.
-- **Doppel-Upload warnen**: gleicher Dateiname + gleiche Größe kurz nacheinander (typisch bei
-  Retries nach `connection reset by peer`) → Hinweis „evtl. Wiederholung, schon gebucht?"
-  statt stiller Zweitbuchung.
 - **Auto-Anlage**: vor dem Anlegen über den Namen deduplizieren; `filament_vendor` aus dem G-Code
   ist der **Preset**-Vendor (steht auf „Snapmaker", nicht auf dem echten Hersteller) — bewusst so
   übernehmen oder leer lassen; Leergewicht (Tare) ist unbekannt → **leer lassen**, nicht raten;
   selbst angelegte Einträge erkennbar markieren.
 - **Kein Verbrauchsblock** (Luban, CNC/Laser, `.nc`) → Zeile ohne Filamentdaten, Buchung deaktiviert.
 - **Abgebrochene Drucke**: bewusst über die manuelle Korrektur abgedeckt (Stop-Button existiert in
-  HA). Fortschritt automatisch vorbelegen wäre eine spätere Ausbaustufe.
-- **„offen" muss sichtbar sein** — ein am Druckerdisplay später gestarteter Job wird sonst nie
-  gebucht. Zähler/Badge in der GUI.
+  HA). Kein Fortschritts-Poll.
 - **Auth**: `:8844` und `:7912` sind im LAN ohne Schutz. Die neuen Endpunkte ändern Inventar →
   ausschließlich POST, kein Zustandswechsel per GET (CSRF/Prefetch).
 - **Retention**: alles behalten, aber nur die letzten ~100 Zeilen rendern.
@@ -122,3 +124,33 @@ Konsistenz-Check `used[g] = used[cm3] × density`.
 **Upstream:** Das ist ein **Fork-Feature**. Nicht für einen PR an `macdylan/sm2uploader`
 vorgesehen und getrennt von den sauberen PR-Branches `fix-fixed-gcode-filesize` (#35) und
 `fix-persist-token-on-connect` (#36) halten.
+
+---
+
+## 5. Offene Punkte
+
+### 🔴 Zurückgestellt — blockiert die Umsetzung
+
+**Hersteller-Feld beim automatischen Anlegen.** Der G-Code liefert in `filament_vendor` den
+*Preset*-Hersteller („Snapmaker"), nicht den echten (DEEPLEE steckt nur im Preset-Namen).
+Bevor das entschieden wird, prüft der Anwender die **Orca-Filament-Presets** und bearbeitet die
+Definitionen gegebenenfalls; danach wird ein neuer G-Code gegengeprüft.
+
+**Bis dahin nicht implementieren.**
+
+Beim Prüfen in Orca relevant, weil diese Werte in Spoolman übernommen werden:
+
+- `filament_vendor` — steht er im Preset richtig, entfällt jede Heuristik
+- `filament_settings_id` (Preset-Name) — Schlüssel für die Zuordnung zur Spoolman-Rolle,
+  muss eindeutig und stabil sein
+- `filament_density` und `filament_diameter` — stimmen sie nicht, rechnen Orca und Spoolman
+  auseinander
+
+### Noch nicht entschieden
+
+- Buchungseinheit **Gramm** bestätigen, dazu Rundung (eine Dezimalstelle?) und Zeitzone der
+  Zeitstempel (`Europe/Berlin`)
+- Zusatzspalten **Druckzeit / Kosten** bestätigen
+- **Retention**: wie viele Zeilen anzeigen, wie viele behalten
+- **Zugriffsschutz** auf `:8844` — die neuen Endpunkte ändern Inventar, aktuell ohne jede Auth
+- Verhalten bei Dateien **ohne Verbrauchsblock** (Luban, `.nc`, Laser/CNC)
