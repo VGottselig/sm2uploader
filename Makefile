@@ -4,7 +4,7 @@ GIT_REF  := $(or $(GITHUB_REF_NAME),$(shell git rev-parse --short HEAD))
 VERSION  := -X 'main.Version=$(GIT_REF)'
 FLAGS    := -ldflags="-w -s $(VERSION)"
 CMD      := go build -trimpath $(FLAGS)
-SRC      := $(wildcard *.go)
+SRC      := $(filter-out %_test.go,$(wildcard *.go))
 EXTRA    := README.md README.zh-cn.md LICENSE
 
 # Platform targets: <os>-<arch>[-<arm>]
