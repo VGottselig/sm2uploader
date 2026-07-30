@@ -30,7 +30,7 @@ intern **8000**, SQLite, Container `spoolman` im Netz `dockervolumes_home_net`.
 | 3 | Tabelle | **eine Zeile pro (Upload × Slot)**, flach, neueste oben |
 | 4 | Zuordnung Filament→Rolle | automatisch über den Orca-Preset-Namen, gepflegt als **`extra`-Feld an der Spoolman-Rolle**; bei mehreren Treffern die **zuletzt benutzte, nicht archivierte** Rolle |
 | 5 | Fehlendes Filament | **automatisch anlegen** — Filament *und* (bei Bedarf) Rolle, mit 1000 g Nettogewicht und allen aus dem G-Code bekannten Werten |
-| 6 | Buchungseinheit | **Gramm** (`use_weight`), eine Dezimalstelle, Zeitstempel in `Europe/Berlin`. Dichte/Durchmesser beim Anlegen aus dem G-Code übernehmen, damit Spoolman und Orca gleich rechnen |
+| 6 | Buchungseinheit | **Gramm** (`use_weight`), **ganze Gramm ohne Nachkommastelle** — der G-Code-Wert wird **einmal beim Parsen** gerundet, danach sind Ledger, Anzeige und Buchung durchgängig ganzzahlig (sonst erzeugt „46" bei intern gebuchten 45,9 ein Delta von +0,1). Zeitstempel in `Europe/Berlin`. Dichte/Durchmesser beim Anlegen aus dem G-Code übernehmen, damit Spoolman und Orca gleich rechnen |
 | 7 | Spalten | Zeit, Datei, Tool, Filament, **G-Code g (readonly)**, **gebucht g (editierbar)**, Druckzeit, Kosten, Status. Die Menge steht bewusst **zweimal**: links der unveränderliche Wert aus dem G-Code, rechts der bei Spoolman verbuchte. „Buchen" = rechten Wert auf den linken setzen |
 | 8 | Buchungszeitpunkt | **sofort**, sobald Upload *und* Startbefehl erfolgreich durch sind. Schlägt der Start fehl, wird **nicht** gebucht — die Zeile bleibt offen |
 | 9 | Korrektur / Storno | **kein eigener Storno-Zustand.** Pro Zeile gibt es einen Wert; jede Änderung schickt die **Differenz zum bereits gebuchten Betrag** an Spoolman (gebucht 120, korrigiert auf 50 → `use_weight: +70`). „Stornieren" = Wert auf 0, „buchen" = Wert auf den G-Code-Wert. Bewusst in Kauf genommen: eine auf 0 korrigierte Zeile ist nicht von einer nie gebuchten unterscheidbar |
@@ -107,6 +107,9 @@ Dateigröße, Slot-Index/Tool, Preset-Name, Farbe, Typ, Dichte, Durchmesser, `gc
 **Regeln**
 
 - Alle Spoolman-Writes sind **Deltas gegen `booked_g`** — nie absolute Werte aus der Tabelle.
+- **Ganze Gramm überall**: einmal beim Parsen runden, danach nur noch Ganzzahlen. Die Restmenge aus
+  Spoolman kann gebrochen sein (frühere Buchungen über die Spoolman-Oberfläche) → nur für die
+  Anzeige runden, nicht zurückschreiben.
 - **Spoolman offline darf den Druck nicht blockieren.** Buchung erst nach erfolgreichem Upload;
   Fehler nur loggen, Zeile auf `fehler` + Retry. Die Antwort an Orca bleibt unberührt.
 - Nur **erfolgreiche** Uploads erzeugen eine Zeile.
