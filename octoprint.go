@@ -37,6 +37,7 @@ e.innerHTML=h;if(after)after()}).catch(function(){})}
 document.addEventListener('input',function(e){if(e.target&&e.target.classList&&e.target.classList.contains('g'))sm2act(e.target)});
 setInterval(function(){sm2swap('/log','.log',false)},3000);
 setInterval(function(){sm2swap('/uploads','#uploads',true,sm2acts)},5000);
+setInterval(function(){sm2swap('/stock','#stock',false)},15000);
 sm2acts();
 `
 
@@ -71,6 +72,11 @@ h2 .hint{text-transform:none;letter-spacing:0;font-weight:400;color:#6b7280}
 .tbl .neg{color:#f87171;font-weight:700}
 .tbl .st-err{color:#f87171;cursor:help;margin-left:5px;font-weight:700}
 .sw{display:inline-block;width:11px;height:11px;border-radius:2px;border:1px solid #6b7280;margin-right:6px;vertical-align:-1px}
+#stock{display:flex;flex-wrap:wrap;gap:7px}
+.chip{display:inline-flex;align-items:center;gap:7px;background:#232327;border:1px solid #2f2f36;border-radius:999px;padding:3px 12px 3px 8px;font-size:13px;font-variant-numeric:tabular-nums;color:#cbd5e1}
+.chip .sw{width:13px;height:13px;border-radius:50%;margin:0;vertical-align:0}
+.chip.warn{color:#fbbf24;border-color:#4a3708}
+.chip.neg{color:#f87171;border-color:#7f1d1d;font-weight:700}
 .tbl input.g{width:62px;background:#1b1b1d;color:#e0e0e0;border:1px solid #4b5563;border-radius:4px;padding:3px 5px;font-size:13px;text-align:right}
 .tbl .act{white-space:nowrap}
 .tbl .act button{background:#374151;color:#e5e7eb;border:0;border-radius:5px;padding:4px 9px;font-size:12px;cursor:pointer;margin-right:4px}
@@ -187,6 +193,8 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			`</form>` +
 			`<h2>Uploads <span class="hint">` + uploadsHint() + `</span></h2>` +
 			`<div id="uploads">` + uploadsHTML() + `</div>` +
+			`<h2>Filament <span class="hint">(remaining, emptiest first)</span></h2>` +
+			`<div id="stock">` + stockHTML() + `</div>` +
 			`<h2>Status</h2><pre class="stats">` + html.EscapeString(_stats.StatsText()) + `</pre>` +
 			`<h2>Log <span class="hint">(newest first, auto-refreshing)</span></h2>` +
 			`<div class="log">` + LogRing.HTML() + `</div>` +
@@ -216,6 +224,14 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		writeResponse(w, http.StatusOK, uploadsHTML())
+	})
+
+	// /stock returns just the filament chips, same live-refresh pattern as /log
+	// and /uploads -- a booking made in Spoolman itself shows up without a reload.
+	mux.HandleFunc("/stock", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		writeResponse(w, http.StatusOK, stockHTML())
 	})
 
 	// /book changes inventory in Spoolman, so it is POST only: no link and no

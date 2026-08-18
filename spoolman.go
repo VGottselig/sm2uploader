@@ -39,6 +39,10 @@ type SmFilament struct {
 	Diameter float64   `json:"diameter"`
 	Weight   *float64  `json:"weight"`
 	ColorHex string    `json:"color_hex"`
+	// Multi-colour spools: comma separated hex list plus how the colours run
+	// ("coaxial" or "longitudinal"). Only read, for the stock swatch.
+	MultiColorHexes     string `json:"multi_color_hexes"`
+	MultiColorDirection string `json:"multi_color_direction"`
 }
 
 type SmSpool struct {
