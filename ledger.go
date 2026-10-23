@@ -29,6 +29,12 @@ type UploadRow struct {
 	File     string    `yaml:"file"`
 	Size     int64     `yaml:"size"`
 
+	// FileID points at the cached copy of the uploaded G-code (cache/<id>.data).
+	// One file per upload, shared by all its slot rows; it lives exactly as long
+	// as one of those rows is in the table. That is what makes "Print again"
+	// possible at all.
+	FileID string `yaml:"file_id,omitempty"`
+
 	Slot     int     `yaml:"slot"` // tool index, -1 without filament data
 	Preset   string  `yaml:"preset,omitempty"`
 	Colour   string  `yaml:"colour,omitempty"`
@@ -147,12 +153,37 @@ func (l *Ledger) Recent(n int) []UploadRow {
 	return out
 }
 
-// Len reports how many rows are kept (everything is kept; only the GUI limits
-// what it renders).
+// Len reports how many rows are in the ledger. The table is the retention window
+// (see retention.go), so this rarely exceeds uploadRowsRendered.
 func (l *Ledger) Len() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.rows)
+}
+
+// Trim drops every row that the table no longer shows and writes the file. The
+// table *is* the retention rule: what it does not render is deleted, and with a
+// row its G-code copy loses its last reference (pruned by ApplyRetention).
+//
+// A row grouped under the same upload as a kept row is not spared -- rows are the
+// unit, not uploads, because only rows carry bookings.
+func (l *Ledger) Trim(keep map[string]bool) ([]*UploadRow, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kept := make([]*UploadRow, 0, len(l.rows))
+	var removed []*UploadRow
+	for _, r := range l.rows {
+		if keep[r.ID] {
+			kept = append(kept, r)
+			continue
+		}
+		removed = append(removed, r)
+	}
+	if len(removed) == 0 {
+		return nil, nil
+	}
+	l.rows = kept
+	return removed, l.saveLocked()
 }
 
 // saveLocked writes the whole ledger atomically: temp file, fsync, rename.

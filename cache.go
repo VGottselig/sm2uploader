@@ -1,15 +1,18 @@
 package main
 
-// cache.go keeps uploads that never reached the printer: offline, printer busy,
-// a declined touchscreen authorization, errors in the printer's file store. One
-// file pair per entry (<id>.data plus <id>.yaml) instead of an index -- a restart
-// loses nothing and the directory stays readable by hand.
+// cache.go keeps the G-code the uploads table needs at hand: uploads that never
+// reached the printer (offline, printer busy, a declined touchscreen
+// authorization, errors in the printer file store) and, for the rows that did
+// reach it, a copy so the very same file can be sent again. One file pair per
+// entry (<id>.data plus <id>.yaml) instead of an index -- a restart loses nothing
+// and the directory stays readable by hand.
 //
-// Nothing is retried automatically: a failed upload shows up in the uploads
-// table (interleaved with the ledger rows by time) and is sent again by hand
-// from there.
+// Nothing is retried automatically. A failed upload shows up in the uploads table
+// with an Upload button, a printed row with a kept copy offers "Print again".
+// Both live exactly as long as the table shows them -- see retention.go.
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -26,6 +29,13 @@ import (
 // CacheDir is set from -cache / CACHE_DIR in main(); empty disables the cache.
 var CacheDir string
 
+// Entry kinds. A pending entry never reached the printer. A held entry is the
+// copy of a file that did; it is only kept so a visible row can print it again.
+const (
+	CacheKindPending = "pending"
+	CacheKindHeld    = "held"
+)
+
 // CacheEntry is the record next to a cached G-code file. Reason is the first
 // failure and is never overwritten; Error is the last manual attempt.
 type CacheEntry struct {
@@ -33,9 +43,13 @@ type CacheEntry struct {
 	File   string    `yaml:"file"`
 	Time   time.Time `yaml:"time"`
 	Size   int64     `yaml:"size"`
+	Kind   string    `yaml:"kind,omitempty"` // empty = pending (files from before the kinds)
 	Reason string    `yaml:"reason,omitempty"`
 	Error  string    `yaml:"error,omitempty"`
 }
+
+// Held reports whether the file behind the entry already reached the printer.
+func (e *CacheEntry) Held() bool { return e.Kind == CacheKindHeld }
 
 var (
 	cacheMu  sync.Mutex
@@ -43,7 +57,7 @@ var (
 	cacheSeq int
 )
 
-// CacheEnabled reports whether failed uploads are kept at all.
+// CacheEnabled reports whether files are kept at all.
 func CacheEnabled() bool { return CacheDir != "" }
 
 func cacheDataPath(id string) string { return filepath.Join(CacheDir, id+".data") }
@@ -91,10 +105,14 @@ func CacheLoad() {
 		if n := idSeq(e.ID); n > cacheSeq {
 			cacheSeq = n
 		}
-		log.Printf("cache entry: %s [%s]", e.File, humanReadableSize(e.Size))
+		if e.Held() {
+			log.Printf("cache entry: %s [%s] kept for a repeat print", e.File, humanReadableSize(e.Size))
+		} else {
+			log.Printf("cache entry: %s [%s]", e.File, humanReadableSize(e.Size))
+		}
 	}
 	if len(cacheMap) > 0 {
-		log.Printf("Cache: %d upload(s) not on the printer, in %s", len(cacheMap), CacheDir)
+		log.Printf("Cache: %d file(s) in %s", len(cacheMap), CacheDir)
 	}
 }
 
@@ -107,19 +125,24 @@ func newCacheID() string {
 	return time.Now().Format("20060102-150405") + "-" + strconv.Itoa(n)
 }
 
-// CacheLen reports how many failed uploads are waiting.
+// CacheLen reports how many files are kept.
 func CacheLen() int {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 	return len(cacheMap)
 }
 
-// CacheList returns copies of all entries, newest first.
-func CacheList() []CacheEntry {
+// CachePending returns copies of the failed uploads, newest first. Only those
+// become table rows of their own; a held copy appears as the button of the row it
+// belongs to.
+func CachePending() []CacheEntry {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 	out := make([]CacheEntry, 0, len(cacheMap))
 	for _, e := range cacheMap {
+		if e.Held() {
+			continue
+		}
 		out = append(out, *e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
@@ -140,13 +163,42 @@ func CacheOpen(e *CacheEntry) (*os.File, error) {
 	return os.Open(cacheDataPath(e.ID))
 }
 
-// CacheRemove drops an entry after it reached the printer.
-func CacheRemove(id string) {
+// CacheMarkHeld turns a failed entry into a kept copy once the upload finally
+// reached the printer: from now on a row in the table references it and "Print
+// again" reads from it.
+func CacheMarkHeld(e *CacheEntry) error {
 	cacheMu.Lock()
-	delete(cacheMap, id)
-	cacheMu.Unlock()
-	os.Remove(cacheDataPath(id))
-	os.Remove(cacheMetaPath(id))
+	defer cacheMu.Unlock()
+	if _, ok := cacheMap[e.ID]; !ok {
+		return fmt.Errorf("cache entry %s is gone", e.ID)
+	}
+	e.Kind = CacheKindHeld
+	e.Reason = ""
+	e.Error = ""
+	return writeCacheMeta(e)
+}
+
+// CachePrune deletes every entry that no longer belongs to the table -- the
+// second half of the retention rule. Returns the number of entries and their
+// total size.
+func CachePrune(keep map[string]bool) (int, int64) {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	var (
+		n     int
+		bytes int64
+	)
+	for id, e := range cacheMap {
+		if keep[id] {
+			continue
+		}
+		delete(cacheMap, id)
+		os.Remove(cacheDataPath(id))
+		os.Remove(cacheMetaPath(id))
+		n++
+		bytes += e.Size
+	}
+	return n, bytes
 }
 
 // CacheSetReason records why the upload failed in the first place. Separate from
@@ -201,16 +253,16 @@ func writeCacheMeta(e *CacheEntry) error {
 	return os.Rename(name, cacheMetaPath(e.ID))
 }
 
-// cacheFromUpload copies the upload into the cache. The reader is rewound first:
-// the failed upload already consumed it.
-func cacheFromUpload(f io.ReadSeeker, name string) (*CacheEntry, error) {
+// cacheFromUpload copies an upload into the cache. The reader is rewound first:
+// the upload already consumed it.
+func cacheFromUpload(f io.ReadSeeker, name, kind string) (*CacheEntry, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(CacheDir, 0o755); err != nil {
 		return nil, err
 	}
-	e := &CacheEntry{ID: newCacheID(), File: filepath.Base(name), Time: time.Now()}
+	e := &CacheEntry{ID: newCacheID(), File: filepath.Base(name), Time: time.Now(), Kind: kind}
 	out, err := os.Create(cacheDataPath(e.ID))
 	if err != nil {
 		return nil, err
@@ -241,4 +293,19 @@ func cacheFromUpload(f io.ReadSeeker, name string) (*CacheEntry, error) {
 	cacheMap[e.ID] = e
 	cacheMu.Unlock()
 	return e, nil
+}
+
+// keepPrintedFile copies a successful upload into the cache, so the table can
+// offer "Print again" while the row is visible. A failure is logged, never fatal:
+// the print is on its way already.
+func keepPrintedFile(f io.ReadSeeker, name string) string {
+	if !CacheEnabled() {
+		return ""
+	}
+	e, err := cacheFromUpload(f, name, CacheKindHeld)
+	if err != nil {
+		log.Printf("Keeping '%s' for a repeat print failed: %s", name, err)
+		return ""
+	}
+	return e.ID
 }

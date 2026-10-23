@@ -93,6 +93,9 @@ func main() {
 	}
 	TheLedger = LoadLedger(UploadsFile)
 	CacheLoad()
+	// The table is the retention rule: drop what it would not render before the
+	// first upload, so a long-running instance cannot grow for ever.
+	ApplyRetention()
 	if TheSpoolman = NewSpoolman(SpoolmanURL); TheSpoolman != nil {
 		log.Printf("Spoolman: %s (warn below %d g)", SpoolmanURL, SpoolmanLowG)
 	} else {

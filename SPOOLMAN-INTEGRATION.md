@@ -39,7 +39,7 @@ intern **8000**, SQLite, Container `spoolman` im Netz `dockervolumes_home_net`.
 | 12 | Rollen | genau **eine Rolle pro Sorte** → Zuordnung ist eindeutig, **kein** Rollen-Dropdown in der Tabelle, nur der Gramm-Wert ist editierbar. Rollentausch pflegt der Anwender in Spoolman (auf 1000 g stellen) |
 | 13 | Restmengen-Warnung | Bedarf gegen `remaining_weight` prüfen und warnen — **nur bei Upload + Start**, nicht bei reinem Upload. Nie blockieren |
 | 14 | Abgebrochene Drucke | rein **manuelle** Korrektur des Werts. Kein Fortschritts-Poll am Drucker |
-| 15 | Retention | **alles** in der Ledger-Datei behalten, in der GUI nur die **10** neuesten Zeilen rendern |
+| 15 | Retention | **Die Tabelle ist die Regel**: was sie zeigt, bleibt — die **20** neuesten Ledger-Zeilen und **alle** fehlgeschlagenen Uploads (die brauchen ihren Upload-Button). Alles andere wird gelöscht, zusammen mit seiner G-code-Kopie. Zusätzlich bleibt zu jeder sichtbaren Zeile die G-code-Datei im Cache, damit **Print again** sie erneut senden und starten kann (das ist ein neuer Druck und bucht erneut, in einer neuen Zeile) |
 | 16 | Zugriffsschutz | `:8844` bleibt **ohne Auth** (LAN-intern, einheitlich zu Spoolman und dem übrigen Stack). Zustandsänderungen ausschließlich per **POST**, damit kein Link und kein Browser-Prefetch bucht |
 | 17 | Dateien ohne Verbrauchsblock | Luban, `.nc`, Laser/CNC bekommen eine **Zeile ohne Buchung**: Zeitstempel und Dateiname, Filamentspalten leer, Buchen-Button deaktiviert. Kein Rechnen aus den E-Bewegungen |
 | 18 | Restmengen-Spalte | zusätzliche Spalte mit der Restmenge der Rolle **nach dieser Buchung**, im Ledger festgehalten — ändert sich nur, wenn diese Zeile korrigiert wird. Noch **nicht** gebuchte Zeilen zeigen den aktuellen Stand der Rolle (ihre Buchung ist 0, also derselbe Wert); mit dem Buchen friert die Zahl ein. Färbung: unter der Schwelle **orange**, unter 0 **rot und fett**. Schwelle per Env `SPOOLMAN_LOW_G`, Standard **100 g** |
@@ -124,9 +124,10 @@ Dateigröße, Slot-Index/Tool, Preset-Name, Farbe, Typ, Dichte, Durchmesser, `gc
 **Format und Schreibweise** (Entscheidung):
 
 - **`/data/uploads.yaml`**, geschrieben mit `gopkg.in/yaml.v3` — schon Abhängigkeit (`localstorage.go`),
-  keine neue. Einheitlich zu `hosts.yaml`, im Editor lesbar und reparierbar. Bei „alles behalten"
-  wächst die Datei ~300 B/Zeile (1000 Drucke ≈ 300 KB) — komplettes Neuschreiben je Änderung ist
-  bei der Größe unkritisch.
+  keine neue. Einheitlich zu `hosts.yaml`, im Editor lesbar und reparierbar. Durch die
+  Tabellen-Retention bleibt die Datei bei ~20 Zeilen (≈6 KB) — komplettes Neuschreiben je Änderung
+  ist damit erst recht unkritisch. Zu jeder Zeile gehört eine G-code-Kopie in `/data/cache`
+  (~1 GB bei 20 Zeilen à 50 MB); sie verschwindet mit der Zeile.
 - **Atomar schreiben**: in `uploads.yaml.tmp` schreiben, `fsync`, dann `os.Rename` über die Zieldatei.
   ⚠️ Das bestehende `LocalStorage.Save()` (`localstorage.go:74-78`) nutzt `os.WriteFile` — truncate
   dann schreiben, **nicht atomar**; ein Absturz mitten im Schreiben zerstört die Datei. Für ein
@@ -156,7 +157,12 @@ Dateigröße, Slot-Index/Tool, Preset-Name, Farbe, Typ, Dichte, Durchmesser, `gc
   HA). Kein Fortschritts-Poll.
 - **Auth**: `:8844` und `:7912` sind im LAN ohne Schutz. Die neuen Endpunkte ändern Inventar →
   ausschließlich POST, kein Zustandswechsel per GET (CSRF/Prefetch).
-- **Retention**: alles behalten, aber nur die 10 neuesten Zeilen rendern.
+- **Retention = Tabelle**: `ApplyRetention()` (`retention.go`) läuft beim Start und nach jedem
+  verbuchten Upload. Es behält die 20 neuesten Ledger-Zeilen, deren G-code-Kopien und **alle**
+  fehlgeschlagenen Uploads; alles andere wird aus `uploads.yaml` bzw. `/data/cache` entfernt.
+  Buchungen selbst gehen nicht verloren — die stehen in Spoolman, nur unsere Historie wird kürzer.
+  Erwartung beim ersten Start mit dieser Version: die vorhandene Ledger-Datei schrumpft auf
+  20 Zeilen (Backup: `uploads.yaml.bak-vor-retention-*`).
 
 **Tests** (Repo hat bisher keine): Unit-Tests für den Parser — Komma- vs. Semikolon-Delimiter,
 quoted Strings, **Semikolon im Filamentnamen**, 1 vs. 4 Slots, fehlende `filament used`-Zeilen,

@@ -38,7 +38,7 @@ func TestRecordUploadWithoutStartBooksNothing(t *testing.T) {
 	sm, _ := f.start()
 	l := withLedgerAndSpoolman(t, sm)
 
-	RecordUpload(sampleUse(), "Elefant.gcode", 3093450, false)
+	RecordUpload(sampleUse(), "Elefant.gcode", 3093450, false, "")
 
 	rows := l.Recent(10)
 	if len(rows) != 1 {
@@ -70,7 +70,7 @@ func TestRecordUploadWithoutStartCreatesSpool(t *testing.T) {
 	sm, _ := f.start()
 	l := withLedgerAndSpoolman(t, sm)
 
-	RecordUpload(sampleUse(), "Elefant.gcode", 3093450, false)
+	RecordUpload(sampleUse(), "Elefant.gcode", 3093450, false, "")
 
 	r := l.Recent(1)[0]
 	if r.SpoolID != 22 {
@@ -97,7 +97,7 @@ func TestRecordUploadWithoutStartCreatesSpool(t *testing.T) {
 func TestRecordUploadWithoutStartSurvivesSpoolmanDown(t *testing.T) {
 	l := withLedgerAndSpoolman(t, NewSpoolman("http://127.0.0.1:1"))
 
-	RecordUpload(sampleUse(), "Elefant.gcode", 100, false)
+	RecordUpload(sampleUse(), "Elefant.gcode", 100, false, "")
 
 	r := l.Recent(1)[0]
 	if r.Status != StatusOpen {
@@ -117,7 +117,7 @@ func TestRecordUploadWithStartBooksImmediately(t *testing.T) {
 	sm, _ := f.start()
 	l := withLedgerAndSpoolman(t, sm)
 
-	RecordUpload(sampleUse(), "Elefant.gcode", 3093450, true)
+	RecordUpload(sampleUse(), "Elefant.gcode", 3093450, true, "")
 
 	rows := l.Recent(10)
 	if len(rows) != 1 {
@@ -154,7 +154,7 @@ func TestRecordUploadMultipleSlots(t *testing.T) {
 		{Slot: 0, Preset: "A", Density: 1.24, Diameter: 1.75, GcodeG: 10},
 		{Slot: 2, Preset: "B", Density: 1.24, Diameter: 1.75, GcodeG: 4},
 	}}
-	RecordUpload(use, "Zwei.gcode", 100, false)
+	RecordUpload(use, "Zwei.gcode", 100, false, "")
 
 	rows := l.Recent(10)
 	if len(rows) != 2 {
@@ -174,7 +174,7 @@ func TestRecordUploadWithoutConsumptionBlock(t *testing.T) {
 	sm, _ := f.start()
 	l := withLedgerAndSpoolman(t, sm)
 
-	RecordUpload(&GcodeUse{HasBlock: false}, "laser.nc", 4096, true)
+	RecordUpload(&GcodeUse{HasBlock: false}, "laser.nc", 4096, true, "")
 
 	rows := l.Recent(10)
 	if len(rows) != 1 {
@@ -198,7 +198,7 @@ func TestBookRowSendsDeltaOnCorrection(t *testing.T) {
 	sm, _ := f.start()
 	l := withLedgerAndSpoolman(t, sm)
 
-	RecordUpload(sampleUse(), "Elefant.gcode", 100, true)
+	RecordUpload(sampleUse(), "Elefant.gcode", 100, true, "")
 	id := l.Recent(1)[0].ID
 
 	if err := BookRow(id, 20); err != nil {
@@ -227,7 +227,7 @@ func TestBookRowCancelReturnsToOpen(t *testing.T) {
 	sm, _ := f.start()
 	l := withLedgerAndSpoolman(t, sm)
 
-	RecordUpload(sampleUse(), "Elefant.gcode", 100, true)
+	RecordUpload(sampleUse(), "Elefant.gcode", 100, true, "")
 	id := l.Recent(1)[0].ID
 
 	if err := BookRow(id, 0); err != nil {
@@ -251,7 +251,7 @@ func TestBookRowIdempotent(t *testing.T) {
 	sm, _ := f.start()
 	l := withLedgerAndSpoolman(t, sm)
 
-	RecordUpload(sampleUse(), "Elefant.gcode", 100, true)
+	RecordUpload(sampleUse(), "Elefant.gcode", 100, true, "")
 	id := l.Recent(1)[0].ID
 
 	if err := BookRow(id, 46); err != nil {
@@ -268,7 +268,7 @@ func TestBookingFailureKeepsBookedG(t *testing.T) {
 	sm := NewSpoolman("http://127.0.0.1:1") // nothing listens here
 	l := withLedgerAndSpoolman(t, sm)
 
-	RecordUpload(sampleUse(), "Elefant.gcode", 100, true)
+	RecordUpload(sampleUse(), "Elefant.gcode", 100, true, "")
 
 	rows := l.Recent(10)
 	if len(rows) != 1 {
@@ -305,7 +305,7 @@ func TestBookingFailureKeepsBookedG(t *testing.T) {
 func TestRecordUploadWithoutSpoolman(t *testing.T) {
 	l := withLedgerAndSpoolman(t, nil)
 
-	RecordUpload(sampleUse(), "Elefant.gcode", 100, true)
+	RecordUpload(sampleUse(), "Elefant.gcode", 100, true, "")
 
 	rows := l.Recent(10)
 	if len(rows) != 1 || rows[0].Status != StatusOpen {
@@ -324,7 +324,7 @@ func TestBookRowRejectsUnknownRowAndNegative(t *testing.T) {
 	if err := BookRow("does-not-exist", 10); err == nil {
 		t.Error("unknown row should fail")
 	}
-	RecordUpload(sampleUse(), "Elefant.gcode", 100, false)
+	RecordUpload(sampleUse(), "Elefant.gcode", 100, false, "")
 	id := l.Recent(1)[0].ID
 	if err := BookRow(id, -5); err == nil {
 		t.Error("a negative amount should fail")
@@ -340,7 +340,7 @@ func TestBookRowZeroGrams(t *testing.T) {
 	use := &GcodeUse{HasBlock: true, Slots: []SlotUse{
 		{Slot: 0, Preset: "Tiny", Density: 1.24, Diameter: 1.75, GcodeG: 0},
 	}}
-	RecordUpload(use, "tiny.gcode", 100, true)
+	RecordUpload(use, "tiny.gcode", 100, true, "")
 
 	r := l.Recent(1)[0]
 	if len(f.uses) != 0 {
@@ -362,7 +362,7 @@ func TestLowStockWarningDoesNotBlock(t *testing.T) {
 	sm, _ := f.start()
 	l := withLedgerAndSpoolman(t, sm)
 
-	RecordUpload(sampleUse(), "Elefant.gcode", 100, true)
+	RecordUpload(sampleUse(), "Elefant.gcode", 100, true, "")
 
 	r := l.Recent(1)[0]
 	if r.Status != StatusBooked {
@@ -380,8 +380,8 @@ func TestUploadsHTMLRendersRows(t *testing.T) {
 	sm, _ := f.start()
 	l := withLedgerAndSpoolman(t, sm)
 
-	RecordUpload(sampleUse(), "Ele<fant>.gcode", 100, true)
-	RecordUpload(&GcodeUse{HasBlock: false}, "laser.nc", 100, false)
+	RecordUpload(sampleUse(), "Ele<fant>.gcode", 100, true, "")
+	RecordUpload(&GcodeUse{HasBlock: false}, "laser.nc", 100, false, "")
 
 	html := uploadsHTML()
 	for _, want := range []string{
@@ -427,7 +427,7 @@ func TestUploadsHTMLRendersRows(t *testing.T) {
 // Without a status column a failed booking still has to be visible.
 func TestUploadsHTMLShowsBookingError(t *testing.T) {
 	l := withLedgerAndSpoolman(t, NewSpoolman("http://127.0.0.1:1"))
-	RecordUpload(sampleUse(), "Elefant.gcode", 100, true)
+	RecordUpload(sampleUse(), "Elefant.gcode", 100, true, "")
 
 	r := l.Recent(1)[0]
 	if r.Status != StatusFailure {
@@ -447,7 +447,7 @@ func TestUploadsHTMLEmptyLedger(t *testing.T) {
 	if got := uploadsHTML(); !strings.Contains(got, "No uploads recorded yet") {
 		t.Errorf("empty ledger renders %q", got)
 	}
-	if got := uploadsHint(); got != "(newest first)" {
-		t.Errorf("hint = %q", got)
+	if got := uploadsHint(); got != "" {
+		t.Errorf("hint for an empty table = %q, want empty", got)
 	}
 }

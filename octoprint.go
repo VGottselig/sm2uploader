@@ -81,7 +81,9 @@ h2 .hint{text-transform:none;letter-spacing:0;font-weight:400;color:#6b7280}
 .chip.neg{color:#f87171;border-color:#7f1d1d;font-weight:700}
 .tbl input.g{width:62px;background:#1b1b1d;color:#e0e0e0;border:1px solid #4b5563;border-radius:4px;padding:3px 5px;font-size:13px;text-align:right}
 .tbl .act{white-space:nowrap}
-.tbl .act button{background:#374151;color:#e5e7eb;border:0;border-radius:5px;padding:4px 9px;font-size:12px;cursor:pointer;margin-right:4px}
+.tbl .act form{display:inline-flex;gap:6px;margin:0;vertical-align:middle}
+.tbl .act form+form{margin-left:6px}
+.tbl .act button{background:#374151;color:#e5e7eb;border:0;border-radius:5px;padding:4px 9px;font-size:12px;cursor:pointer;margin:0}
 .tbl .act button:hover{background:#4b5563}
 .tbl .act button.danger:hover{background:#991b1b}
 .empty{color:#6b7280;font-size:13px;margin:0}
@@ -311,7 +313,13 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		payload := NewPayload(f, entry.File, info.Size())
 		err = Connector.Upload(printer, payload, true)
 		if payload.Uploaded {
-			RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started)
+			// The file is on the printer now, so it stops being a failed upload and
+			// becomes the copy behind the new row -- which keeps "Print again" alive
+			// for as long as that row is in the table.
+			if merr := CacheMarkHeld(entry); merr != nil {
+				log.Printf("Cache: %s", merr)
+			}
+			RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started, entry.ID)
 		}
 		if err != nil {
 			CacheSetError(entry, err)
@@ -320,8 +328,63 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			return
 		}
 		_stats.addSuccess(entry.File, info.Size())
-		CacheRemove(id)
 		http.Redirect(w, r, "/?ok="+url.QueryEscape("Uploaded from cache: "+entry.File), http.StatusSeeOther)
+	})
+
+	// /row/print sends the G-code of an already printed row to the printer again.
+	// That is a full new print: it books the filament again and writes a new row,
+	// the old row keeps its own booking. Both point at the same cached copy, which
+	// survives until the last of them leaves the table.
+	mux.HandleFunc("/row/print", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowedResponse(w, r.Method)
+			return
+		}
+		id := r.FormValue("id")
+		row, ok := TheLedger.Get(id)
+		if !ok {
+			http.Redirect(w, r, "/?err="+url.QueryEscape("unknown row "+id), http.StatusSeeOther)
+			return
+		}
+		if row.FileID == "" {
+			http.Redirect(w, r, "/?err="+url.QueryEscape("no copy of "+row.File+" was kept"), http.StatusSeeOther)
+			return
+		}
+		entry, ok := CacheGet(row.FileID)
+		if !ok {
+			http.Redirect(w, r, "/?err="+url.QueryEscape("the copy of "+row.File+" is gone"), http.StatusSeeOther)
+			return
+		}
+		f, err := CacheOpen(entry)
+		if err != nil {
+			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+			return
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+			return
+		}
+
+		gcodeUse, perr := ParseGcodeUse(f)
+		if perr != nil {
+			log.Printf("Warning: could not read the consumption block of '%s': %s", entry.File, perr)
+		}
+
+		log.Printf("Printing '%s' again from the cache [%s]", entry.File, humanReadableSize(info.Size()))
+		payload := NewPayload(f, entry.File, info.Size())
+		err = Connector.Upload(printer, payload, true)
+		if payload.Uploaded {
+			RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started, entry.ID)
+		}
+		if err != nil {
+			_stats.addFailure(entry.File, info.Size())
+			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+			return
+		}
+		_stats.addSuccess(entry.File, info.Size())
+		http.Redirect(w, r, "/?ok="+url.QueryEscape("Printing again: "+entry.File), http.StatusSeeOther)
 	})
 
 	mux.HandleFunc("/api/files/local", func(w http.ResponseWriter, r *http.Request) {
@@ -410,7 +473,11 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		// start failed" counts as successful here: the file is on the printer, so
 		// the row exists and stays open instead of being booked.
 		if payload.Uploaded {
-			RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started)
+			// Keep a copy of the file that was just printed. The table shows this
+			// upload for as long as the row is visible, so the copy lives exactly
+			// that long (retention.go) -- and makes "Print again" possible.
+			fileID := keepPrintedFile(file, payload.Name)
+			RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started, fileID)
 		}
 
 		// Every failed upload is kept, not just the offline case -- otherwise the
@@ -425,7 +492,7 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		// empty or oversized file (the fault is in the file, an entry would be a
 		// dead end).
 		if shouldCache(err, payload) {
-			entry, cerr := cacheFromUpload(file, payload.Name)
+			entry, cerr := cacheFromUpload(file, payload.Name, CacheKindPending)
 			if cerr != nil {
 				log.Printf("Caching '%s' failed: %s", payload.Name, cerr)
 			} else {

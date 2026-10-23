@@ -24,7 +24,9 @@ var bookMu sync.Mutex
 //
 // Only successful uploads get a row. If the upload landed but the start failed,
 // the row stays open (status "offen") and the user books it from the table.
-func RecordUpload(use *GcodeUse, name string, size int64, started bool) {
+// fileID is the cached copy of the very file that was sent ("" when no copy could
+// be kept); all rows of the upload share it, so any of them can print again.
+func RecordUpload(use *GcodeUse, name string, size int64, started bool, fileID string) {
 	now := time.Now().In(berlinLoc())
 	uploadID := newUploadID(now)
 
@@ -34,7 +36,8 @@ func RecordUpload(use *GcodeUse, name string, size int64, started bool) {
 		// Deliberately no computing from the E moves.
 		rows = append(rows, &UploadRow{
 			ID: uploadID + "-T-", UploadID: uploadID, Time: now, File: name, Size: size,
-			Slot: -1, Status: StatusOpen, NoFilament: true,
+			FileID: fileID,
+			Slot:   -1, Status: StatusOpen, NoFilament: true,
 		})
 	} else {
 		for _, slot := range use.Slots {
@@ -44,6 +47,7 @@ func RecordUpload(use *GcodeUse, name string, size int64, started bool) {
 				Time:      now,
 				File:      name,
 				Size:      size,
+				FileID:    fileID,
 				Slot:      slot.Slot,
 				Preset:    slot.Preset,
 				Colour:    slot.Colour,
@@ -63,6 +67,10 @@ func RecordUpload(use *GcodeUse, name string, size int64, started bool) {
 	if TheLedger == nil {
 		return
 	}
+	// The table is the retention rule: once the new rows are in, whatever no longer
+	// fits gets deleted -- also on a booking failure, which is why this is deferred
+	// rather than called on the happy path only.
+	defer ApplyRetention()
 	if err := TheLedger.Append(rows...); err != nil {
 		log.Printf("Ledger: could not write the rows for '%s': %s", name, err)
 	}

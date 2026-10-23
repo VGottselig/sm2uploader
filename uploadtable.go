@@ -10,25 +10,27 @@ import (
 	"time"
 )
 
-// uploadRowsRendered is how many rows the GUI shows. Everything is kept in
-// uploads.yaml, only the rendering is capped.
-const uploadRowsRendered = 10
+// uploadRowsRendered is how many ledger rows the table shows. It is not only a
+// display limit: the table is the retention rule (retention.go), so a row that
+// falls out of it is deleted, together with its G-code copy.
+const uploadRowsRendered = 20
 
 // currencySymbols keeps the common codes short in the table.
 var currencySymbols = map[string]string{"EUR": "€", "USD": "$", "GBP": "£", "CHF": "CHF"}
 
-// uploadsHint tells how much of the ledger is on screen.
+// uploadsHint tells what the table shows -- and that it is also the retention
+// rule, so nobody wonders where an old row went.
 func uploadsHint() string {
 	if TheLedger == nil {
 		return ""
 	}
-	hint := "(newest first)"
-	if total := TheLedger.Len(); total > uploadRowsRendered {
-		hint = fmt.Sprintf("(%d newest of %d)", uploadRowsRendered, total)
+	if TheLedger.Len() == 0 && len(CachePending()) == 0 {
+		return ""
 	}
+	hint := fmt.Sprintf("(newest %d only — everything older is deleted with its file)", uploadRowsRendered)
 	// The cached rows are always rendered in full -- each one needs its Upload
 	// button -- so they are announced separately from the ledger limit.
-	if n := CacheLen(); n > 0 {
+	if n := len(CachePending()); n > 0 {
 		hint += fmt.Sprintf(" — %d cached, NOT on the printer yet", n)
 	}
 	return hint
@@ -41,9 +43,8 @@ func uploadsHTML() string {
 	if TheLedger == nil {
 		return `<p class="empty">Ledger not initialised.</p>`
 	}
-	rows := TheLedger.Recent(uploadRowsRendered)
-	cached := CacheList()
-	if len(rows) == 0 && len(cached) == 0 {
+	items := uploadItems()
+	if len(items) == 0 {
 		return `<p class="empty">No uploads recorded yet.</p>`
 	}
 
@@ -56,24 +57,6 @@ func uploadsHTML() string {
 		`<th class="num">G-code g</th><th class="num">booked g</th><th class="num">remaining g</th>` +
 		`<th>Print time</th><th class="num">Cost</th><th>Action</th>` +
 		`</tr></thead><tbody>`)
-	// One table, one order: a failed upload is a row like any other, sorted by
-	// its own time, so a cached file sits where it belongs instead of being
-	// pushed to the top. The ledger stays limited to its newest rows, the cached
-	// ones are always shown -- otherwise an old cached file would scroll out of
-	// reach.
-	type entry struct {
-		time time.Time
-		row  *UploadRow
-		cach *CacheEntry
-	}
-	items := make([]entry, 0, len(rows)+len(cached))
-	for i := range rows {
-		items = append(items, entry{time: rows[i].Time, row: &rows[i]})
-	}
-	for i := range cached {
-		items = append(items, entry{time: cached[i].Time, cach: &cached[i]})
-	}
-	sort.SliceStable(items, func(i, j int) bool { return items[i].time.After(items[j].time) })
 	for _, it := range items {
 		if it.cach != nil {
 			writeCacheRow(&b, *it.cach)
@@ -83,6 +66,36 @@ func uploadsHTML() string {
 	}
 	b.WriteString(`</tbody></table>`)
 	return b.String()
+}
+
+// tableEntry is one row of the uploads table: either a ledger row or a failed
+// upload waiting in the cache.
+type tableEntry struct {
+	time time.Time
+	row  *UploadRow
+	cach *CacheEntry
+}
+
+// uploadItems assembles what the table shows: the newest uploadRowsRendered
+// ledger rows plus every failed upload, one list sorted by time. A failed upload
+// is a row like any other and sits where it belongs instead of being pushed to
+// the top; it is always shown, because it needs its Upload button. Retention
+// (retention.go) keeps exactly this set -- no more and no less.
+func uploadItems() []tableEntry {
+	if TheLedger == nil {
+		return nil
+	}
+	rows := TheLedger.Recent(uploadRowsRendered)
+	cached := CachePending()
+	items := make([]tableEntry, 0, len(rows)+len(cached))
+	for i := range rows {
+		items = append(items, tableEntry{time: rows[i].Time, row: &rows[i]})
+	}
+	for i := range cached {
+		items = append(items, tableEntry{time: cached[i].Time, cach: &cached[i]})
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].time.After(items[j].time) })
+	return items
 }
 
 func writeUploadRow(b *strings.Builder, r UploadRow) {
@@ -95,7 +108,11 @@ func writeUploadRow(b *strings.Builder, r UploadRow) {
 		b.WriteString(`<td class="dim">no consumption block</td>`)
 		b.WriteString(`<td class="num dim">—</td><td class="num dim">—</td><td class="num dim">—</td>`)
 		b.WriteString(`<td class="dim">—</td><td class="num dim">—</td>`)
-		b.WriteString(`<td class="dim">—</td>`)
+		if btn := reprintHTML(r); btn != "" {
+			b.WriteString(`<td class="act">` + btn + `</td>`)
+		} else {
+			b.WriteString(`<td class="dim">—</td>`)
+		}
 		b.WriteString(`</tr>`)
 		return
 	}
@@ -125,7 +142,14 @@ func writeUploadRow(b *strings.Builder, r UploadRow) {
 		`<button data-act="book" name="action" value="book" title="set to the G-code amount"` + actHidden("book", active) + `>Book</button>` +
 		`<button data-act="set" name="action" value="set" title="book the amount entered"` + actHidden("set", active) + `>Set</button>` +
 		`<button data-act="cancel" name="action" value="cancel" class="danger" title="refund back to 0 g"` + actHidden("cancel", active) + `>Cancel</button>` +
-		`</form></td>`)
+		`</form>`)
+	// The file is still in the cache while this row is in the table, so it can go
+	// to the printer a second time. That is a full new print: it books again, in a
+	// new row.
+	if btn := reprintHTML(r); btn != "" {
+		b.WriteString(btn)
+	}
+	b.WriteString(`</td>`)
 	b.WriteString(`</tr>`)
 }
 
@@ -149,6 +173,21 @@ func writeCacheRow(b *strings.Builder, c CacheEntry) {
 		`<button type="submit" title="upload to the printer and start the print">Upload</button>` +
 		`</form></td>`)
 	b.WriteString(`</tr>`)
+}
+
+// reprintHTML is the "Print again" button for a printed row whose G-code copy is
+// still cached. No copy, no button -- the alternative would be a dead link.
+func reprintHTML(r UploadRow) string {
+	if r.FileID == "" {
+		return ""
+	}
+	if _, ok := CacheGet(r.FileID); !ok {
+		return ""
+	}
+	return `<form method="POST" action="/row/print">` +
+		`<input type="hidden" name="id" value="` + html.EscapeString(r.ID) + `">` +
+		`<button type="submit" title="send this file to the printer again and start it (books the filament again)">Print again</button>` +
+		`</form>`
 }
 
 // activeAct picks the single action to show for a booked amount, mirroring the

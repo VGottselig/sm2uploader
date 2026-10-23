@@ -180,8 +180,8 @@ keeps its own record in **`uploads.yaml`** (yaml, editable and repairable by han
 cancellation would be possible.
 
 It is written atomically (temp file, fsync, rename) and guarded by a mutex, because an upload
-appending a row and a *Book* click changing one can genuinely overlap. Every row is kept forever;
-the GUI renders the 10 newest.
+appending a row and a *Book* click changing one can genuinely overlap. The uploads table *is* the retention rule: it renders the 20 newest rows, and every row
+that falls out of it is deleted together with its cached G-code copy -- see `retention.go`.
 
 > ⚠️ **The ledger is the only record of what was booked.** There is no reconciliation against
 > Spoolman, so deleting it orphans past bookings: Spoolman still holds the grams while no row knows
