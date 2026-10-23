@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -16,6 +17,9 @@ const (
 var (
 	errFileEmpty    = errors.New("File is empty.")
 	errFileTooLarge = errors.New("File is too large.")
+	// errPrinterUnavailable means nothing was even attempted: no handler could
+	// reach the printer. The cache names that case "Printer offline".
+	errPrinterUnavailable = errors.New("printer is not available")
 )
 
 // OnPrinterUpdate, if set, is called after a successful connect so the caller
@@ -170,7 +174,7 @@ func (c *connector) Upload(printer *Printer, payload *Payload, start bool) error
 		}
 	}
 	// Return error if printer is not available
-	return errors.New("Printer " + printer.IP + " is not available.")
+	return fmt.Errorf("%w: %s", errPrinterUnavailable, printer.IP)
 }
 
 func (c *connector) PreHeatCommands(printer *Printer, tool_1_temperature int, tool_2_temperature int, bed_temperature int, home bool) error {
@@ -213,7 +217,7 @@ func (c *connector) PreHeatCommands(printer *Printer, tool_1_temperature int, to
 		}
 	}
 	// Return error if printer is not available
-	return errors.New("Printer " + printer.IP + " is not available.")
+	return fmt.Errorf("%w: %s", errPrinterUnavailable, printer.IP)
 }
 
 var Connector = &connector{}

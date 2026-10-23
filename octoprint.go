@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -55,6 +56,7 @@ h2 .hint{text-transform:none;letter-spacing:0;font-weight:400;color:#6b7280}
 .banner{padding:10px 14px;border-radius:7px;margin:14px 0;font-size:14px}
 .banner-ok{background:#123524;color:#86efac;border:1px solid #166534}
 .banner-err{background:#3b1414;color:#fca5a5;border:1px solid #991b1b}
+.banner-warn{background:#3a2c08;color:#fcd34d;border:1px solid #a16207}
 .stats{background:#232327;border-radius:8px;padding:12px 14px;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#b8b8b8;white-space:pre-wrap;overflow-x:auto;margin:0}
 .log{background:#141416;border-radius:8px;padding:12px 14px;font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;overflow:auto;max-height:60vh}
 .log span{display:block;white-space:pre-wrap;word-break:break-word}
@@ -86,10 +88,10 @@ h2 .hint{text-transform:none;letter-spacing:0;font-weight:400;color:#6b7280}
 `
 
 var (
-	fixShutoff        = true
-	fixPreheat        = true
+	fixShutoff = true
+	fixPreheat = true
 	// fixReinforceTower = true
-	fixReplaceTool    = true
+	fixReplaceTool = true
 
 	// userAgent: OrcaSlicer/01.09.03.50
 	// userAgent: BBL-Slicer/v01.09.03.50 (dark) Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)
@@ -177,6 +179,10 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			banner = `<div class="banner banner-ok">` + html.EscapeString(ok) + `</div>`
 		} else if e := r.URL.Query().Get("err"); e != "" {
 			banner = `<div class="banner banner-err">Error: ` + html.EscapeString(e) + `</div>`
+		} else if w := r.URL.Query().Get("warn"); w != "" {
+			// Not an error from the GUI's point of view: the upload is safe in
+			// the cache, it just never reached the printer.
+			banner = `<div class="banner banner-warn">` + html.EscapeString(w) + `</div>`
 		}
 		page := `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
 			`<meta name="viewport" content="width=device-width,initial-scale=1">` +
@@ -271,6 +277,53 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		http.Redirect(w, r, "/?ok="+url.QueryEscape(fmt.Sprintf("%s T%d: %d g booked", row.File, row.Slot, target)), http.StatusSeeOther)
 	})
 
+	// /cache/upload sends a cached file again and starts the print. It creates a
+	// normal ledger row on success, then drops the cache entry.
+	mux.HandleFunc("/cache/upload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowedResponse(w, r.Method)
+			return
+		}
+		id := r.FormValue("id")
+		entry, ok := CacheGet(id)
+		if !ok {
+			http.Redirect(w, r, "/?err="+url.QueryEscape("cache entry: unknown id "+id), http.StatusSeeOther)
+			return
+		}
+		f, err := CacheOpen(entry)
+		if err != nil {
+			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+			return
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+			return
+		}
+
+		gcodeUse, perr := ParseGcodeUse(f)
+		if perr != nil {
+			log.Printf("Warning: could not read the consumption block of '%s': %s", entry.File, perr)
+		}
+
+		log.Printf("Uploading cached file '%s' [%s]", entry.File, humanReadableSize(info.Size()))
+		payload := NewPayload(f, entry.File, info.Size())
+		err = Connector.Upload(printer, payload, true)
+		if payload.Uploaded {
+			RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started)
+		}
+		if err != nil {
+			CacheSetError(entry, err)
+			_stats.addFailure(entry.File, info.Size())
+			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+			return
+		}
+		_stats.addSuccess(entry.File, info.Size())
+		CacheRemove(id)
+		http.Redirect(w, r, "/?ok="+url.QueryEscape("Uploaded from cache: "+entry.File), http.StatusSeeOther)
+	})
+
 	mux.HandleFunc("/api/files/local", func(w http.ResponseWriter, r *http.Request) {
 		// Check if request is a POST request
 		if r.Method != http.MethodPost {
@@ -360,6 +413,36 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started)
 		}
 
+		// Every failed upload is kept, not just the offline case -- otherwise the
+		// file is gone on "printer busy", a declined touchscreen authorization or
+		// an error in the printer's file store. Orca still gets 200, because a
+		// failure there throws the slice export away; log, banner and table say
+		// unmistakably that nothing arrived at the printer. Nothing is retried
+		// automatically, the user sends it again from the table.
+		//
+		// Two cases stay out: payload.Uploaded (the file IS on the printer, only
+		// the start failed -- a second "Upload" would print it twice) and an
+		// empty or oversized file (the fault is in the file, an entry would be a
+		// dead end).
+		if shouldCache(err, payload) {
+			entry, cerr := cacheFromUpload(file, payload.Name)
+			if cerr != nil {
+				log.Printf("Caching '%s' failed: %s", payload.Name, cerr)
+			} else {
+				CacheSetReason(entry, err)
+				_stats.addFailure(payload.Name, entry.Size)
+				msg := fmt.Sprintf("%s -- '%s' [%s] was CACHED, it is NOT on the printer. Upload it by hand from the uploads table.",
+					cacheReason(err), entry.File, humanReadableSize(entry.Size))
+				log.Print(msg)
+				if gui {
+					http.Redirect(w, r, "/?warn="+url.QueryEscape(msg), http.StatusSeeOther)
+					return
+				}
+				writeResponse(w, http.StatusOK, `{"done": true, "cached": true}`)
+				return
+			}
+		}
+
 		if err != nil {
 			_stats.addFailure(payload.Name, payload.Size)
 			if gui {
@@ -410,6 +493,24 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 	log.Printf("Server started, now you can upload files to http://%s", listener.Addr().String())
 	// Start the server
 	return http.Serve(listener, handler)
+}
+
+// shouldCache says whether a failed upload belongs in the cache. The two
+// exceptions are explained at the call site.
+func shouldCache(err error, payload *Payload) bool {
+	if err == nil || !CacheEnabled() || payload.Uploaded {
+		return false
+	}
+	return !errors.Is(err, errFileEmpty) && !errors.Is(err, errFileTooLarge)
+}
+
+// cacheReason phrases the failure so it reads as the start of a sentence in log,
+// banner and table. "Printer offline" stays literal, that message is known.
+func cacheReason(err error) string {
+	if errors.Is(err, errPrinterUnavailable) {
+		return "Printer offline"
+	}
+	return fmt.Sprintf("Upload failed (%s)", err.Error())
 }
 
 func writeResponse(w http.ResponseWriter, status int, body string) {
@@ -486,11 +587,11 @@ func testUserAgent(userAgent, apiKey string) string {
 			} else {
 				apiKey += ";nopreheat;"
 			}
-		// if !strings.Contains(apiKey, "noreinforcetower") && strings.Contains(apiKey, "reinforceTower") {
-		// 	apiKey = strings.Replace(apiKey, "reinforceTower", "noreinforcetower", -1)
-		// } else {
-		// 	apiKey += ";noreinforcetower;"
-		// }
+			// if !strings.Contains(apiKey, "noreinforcetower") && strings.Contains(apiKey, "reinforceTower") {
+			// 	apiKey = strings.Replace(apiKey, "reinforceTower", "noreinforcetower", -1)
+			// } else {
+			// 	apiKey += ";noreinforcetower;"
+			// }
 		}
 	}
 	return apiKey

@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"html"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // uploadRowsRendered is how many rows the GUI shows. Everything is kept in
@@ -20,11 +22,16 @@ func uploadsHint() string {
 	if TheLedger == nil {
 		return ""
 	}
-	total := TheLedger.Len()
-	if total <= uploadRowsRendered {
-		return "(newest first)"
+	hint := "(newest first)"
+	if total := TheLedger.Len(); total > uploadRowsRendered {
+		hint = fmt.Sprintf("(%d newest of %d)", uploadRowsRendered, total)
 	}
-	return fmt.Sprintf("(%d newest of %d)", uploadRowsRendered, total)
+	// The cached rows are always rendered in full -- each one needs its Upload
+	// button -- so they are announced separately from the ledger limit.
+	if n := CacheLen(); n > 0 {
+		hint += fmt.Sprintf(" — %d cached, NOT on the printer yet", n)
+	}
+	return hint
 }
 
 // uploadsHTML renders the upload table: one row per (upload x slot), newest
@@ -35,7 +42,8 @@ func uploadsHTML() string {
 		return `<p class="empty">Ledger not initialised.</p>`
 	}
 	rows := TheLedger.Recent(uploadRowsRendered)
-	if len(rows) == 0 {
+	cached := CacheList()
+	if len(rows) == 0 && len(cached) == 0 {
 		return `<p class="empty">No uploads recorded yet.</p>`
 	}
 
@@ -48,8 +56,30 @@ func uploadsHTML() string {
 		`<th class="num">G-code g</th><th class="num">booked g</th><th class="num">remaining g</th>` +
 		`<th>Print time</th><th class="num">Cost</th><th>Action</th>` +
 		`</tr></thead><tbody>`)
-	for _, r := range rows {
-		writeUploadRow(&b, r)
+	// One table, one order: a failed upload is a row like any other, sorted by
+	// its own time, so a cached file sits where it belongs instead of being
+	// pushed to the top. The ledger stays limited to its newest rows, the cached
+	// ones are always shown -- otherwise an old cached file would scroll out of
+	// reach.
+	type entry struct {
+		time time.Time
+		row  *UploadRow
+		cach *CacheEntry
+	}
+	items := make([]entry, 0, len(rows)+len(cached))
+	for i := range rows {
+		items = append(items, entry{time: rows[i].Time, row: &rows[i]})
+	}
+	for i := range cached {
+		items = append(items, entry{time: cached[i].Time, cach: &cached[i]})
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].time.After(items[j].time) })
+	for _, it := range items {
+		if it.cach != nil {
+			writeCacheRow(&b, *it.cach)
+			continue
+		}
+		writeUploadRow(&b, *it.row)
 	}
 	b.WriteString(`</tbody></table>`)
 	return b.String()
@@ -95,6 +125,28 @@ func writeUploadRow(b *strings.Builder, r UploadRow) {
 		`<button data-act="book" name="action" value="book" title="set to the G-code amount"` + actHidden("book", active) + `>Book</button>` +
 		`<button data-act="set" name="action" value="set" title="book the amount entered"` + actHidden("set", active) + `>Set</button>` +
 		`<button data-act="cancel" name="action" value="cancel" class="danger" title="refund back to 0 g"` + actHidden("cancel", active) + `>Cancel</button>` +
+		`</form></td>`)
+	b.WriteString(`</tr>`)
+}
+
+// writeCacheRow renders a failed upload: same columns as a ledger row, the
+// non-existent booking fields as a dash, the file size where the cost sits, and
+// an Upload button that sends the file again and starts the print.
+func writeCacheRow(b *strings.Builder, c CacheEntry) {
+	statusTitle := ""
+	if c.Reason != "" {
+		statusTitle = ` title="` + html.EscapeString(c.Reason) + `"`
+	}
+	b.WriteString(`<tr>`)
+	b.WriteString(`<td class="nw">` + html.EscapeString(c.Time.In(berlinLoc()).Format("02 Jan 15:04")) + `</td>`)
+	b.WriteString(`<td class="file" title="` + html.EscapeString(c.File) + `">` + html.EscapeString(c.File) + `</td>`)
+	b.WriteString(`<td class="warn nw"` + statusTitle + `>cached — not on the printer</td>`)
+	b.WriteString(`<td class="num dim">—</td><td class="num dim">—</td><td class="num dim">—</td>`)
+	b.WriteString(`<td class="dim">—</td>`)
+	b.WriteString(`<td class="num dim">` + humanReadableSize(c.Size) + `</td>`)
+	b.WriteString(`<td class="act"><form method="POST" action="/cache/upload">` +
+		`<input type="hidden" name="id" value="` + html.EscapeString(c.ID) + `">` +
+		`<button type="submit" title="upload to the printer and start the print">Upload</button>` +
 		`</form></td>`)
 	b.WriteString(`</tr>`)
 }
