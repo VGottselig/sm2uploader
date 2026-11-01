@@ -17,7 +17,7 @@ func TestRecordStoredLeavesRowsOpen(t *testing.T) {
 	if id == "" {
 		t.Fatal("file not kept")
 	}
-	RecordStored(sampleUse(), "Elefant.gcode", 3, id)
+	RecordStored(sampleUse(), "Elefant.gcode", 3, id, "")
 
 	r := l.Recent(1)[0]
 	if !r.Stored || r.FileID != id || r.BookedG != 0 || r.Status != StatusOpen || r.SpoolID != 22 {
@@ -35,9 +35,6 @@ func TestRecordStoredLeavesRowsOpen(t *testing.T) {
 	if strings.Contains(h, "Print again") {
 		t.Error("a never printed row must offer Print, not Print again")
 	}
-	if len(CachePending()) != 0 {
-		t.Error("a stored upload is not a failed upload")
-	}
 }
 
 // "Print" on a stored row books that same row -- no second row.
@@ -49,7 +46,7 @@ func TestPrintedStoredBooksTheSameRows(t *testing.T) {
 
 	use := sampleUse()
 	use.Slots = append(use.Slots, SlotUse{Slot: 2, Preset: "DEEPLEE PLA PRO Rosa", GcodeG: 4})
-	RecordStored(use, "Elefant.gcode", 3, keepPrintedFile(strings.NewReader("G1\n"), "Elefant.gcode"))
+	RecordStored(use, "Elefant.gcode", 3, keepPrintedFile(strings.NewReader("G1\n"), "Elefant.gcode"), "")
 	rows := l.Recent(2)
 
 	PrintedStored(rows[0].UploadID, true)
@@ -72,7 +69,7 @@ func TestPrintedStoredWithoutStart(t *testing.T) {
 	f := newFake(t)
 	sm, _ := f.start()
 	l := withLedgerAndSpoolman(t, sm)
-	RecordStored(sampleUse(), "Elefant.gcode", 3, "")
+	RecordStored(sampleUse(), "Elefant.gcode", 3, "", "")
 	r := l.Recent(1)[0]
 
 	PrintedStored(r.UploadID, false)
@@ -119,25 +116,23 @@ func TestDeleteUpload(t *testing.T) {
 	}
 }
 
-// A failed upload can be deleted by hand; a held copy cannot be deleted that way.
-func TestCacheDelete(t *testing.T) {
-	withCacheDir(t)
-	withLedgerAndSpoolman(t, nil)
-	e, err := cacheFromUpload(strings.NewReader("G1\n"), "Fail.gcode", CacheKindPending)
-	if err != nil {
-		t.Fatal(err)
+// "Print" failing again keeps the rows stored and records the reason; a
+// successful print clears it.
+func TestMarkUploadError(t *testing.T) {
+	l := withLedgerAndSpoolman(t, nil)
+	RecordStored(sampleUse(), "Elefant.gcode", 3, "", "Printer offline")
+	r := l.Recent(1)[0]
+	if r.UploadError != "Printer offline" || !r.Stored {
+		t.Fatalf("row = %+v", r)
 	}
-	if !strings.Contains(uploadsHTML(), `action="/cache/delete"`) {
-		t.Error("the cached row has no Delete entry")
+	MarkUploadError(r.UploadID, errPrinterUnavailable)
+	r, _ = l.Get(r.ID)
+	if !r.Stored || r.UploadError != "Printer offline" {
+		t.Errorf("after a second failure: stored %v %q", r.Stored, r.UploadError)
 	}
-	if err := CacheDelete(e.ID); err != nil {
-		t.Fatal(err)
-	}
-	if len(CachePending()) != 0 {
-		t.Error("entry still pending")
-	}
-	held := keepPrintedFile(strings.NewReader("G1\n"), "Ok.gcode")
-	if err := CacheDelete(held); err == nil {
-		t.Error("a held copy must not be deletable on its own")
+	PrintedStored(r.UploadID, false)
+	r, _ = l.Get(r.ID)
+	if r.Stored || r.UploadError != "" {
+		t.Errorf("after the print: stored %v %q", r.Stored, r.UploadError)
 	}
 }

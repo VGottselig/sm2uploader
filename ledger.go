@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,10 +60,13 @@ type UploadRow struct {
 	// booking of the row then goes to SpoolID instead of resolving the preset.
 	SpoolManual bool `yaml:"spool_manual,omitempty"`
 
-	// Stored marks an Orca "Upload" without start: the file sits on sm2uploader
-	// only (FileID) and was never sent to the printer. "Print" in the row menu
-	// sends it and books this very row; afterwards the flag is gone.
-	Stored bool `yaml:"stored,omitempty"`
+	// Stored marks a file that sits on sm2uploader only (FileID) and was never
+	// sent to the printer: an Orca "Upload" without start, or an Upload+Start that
+	// failed before the file arrived. "Print" in the row menu sends it and books
+	// this very row; afterwards the flag is gone. UploadError is why the last
+	// attempt to get it onto the printer failed (empty for a plain upload).
+	Stored      bool   `yaml:"stored,omitempty"`
+	UploadError string `yaml:"upload_error,omitempty"`
 
 	// NoFilament marks Luban/.nc/laser/CNC uploads: timestamp and file name
 	// only, no booking (no guessing from E moves).
@@ -122,6 +126,18 @@ func (l *Ledger) Append(rows ...*UploadRow) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.rows = append(l.rows, rows...)
+	return l.saveLocked()
+}
+
+// Insert adds rows at their place in time and writes the file. Append is the
+// normal case (a new upload is always the newest); Insert is for rows that carry
+// an older time, so the retention rule -- which counts from the end -- still
+// sees the newest rows last.
+func (l *Ledger) Insert(rows ...*UploadRow) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rows = append(l.rows, rows...)
+	sort.SliceStable(l.rows, func(i, j int) bool { return l.rows[i].Time.Before(l.rows[j].Time) })
 	return l.saveLocked()
 }
 

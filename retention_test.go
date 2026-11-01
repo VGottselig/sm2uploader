@@ -87,24 +87,50 @@ func TestRetentionKeepsFileWhileRowVisible(t *testing.T) {
 	}
 }
 
-// A failed upload has no ledger row of its own -- it is always rendered, so its
-// file is never pruned, no matter how many uploads follow.
-func TestRetentionKeepsPendingUploads(t *testing.T) {
+// Failed uploads of older versions (pending cache entries) become stored rows at
+// their original time; the copy then belongs to the row and the retention rule
+// treats it like any other.
+func TestMigratePendingBecomesStoredRow(t *testing.T) {
 	withCacheDir(t)
-	withLedgerAndSpoolman(t, nil)
+	f := newFake(t)
+	sm, _ := f.start()
+	l := withLedgerAndSpoolman(t, sm)
 
-	e, err := cacheFromUpload(strings.NewReader("gcode bytes"), "pending.gcode", CacheKindPending)
+	RecordUpload(&GcodeUse{HasBlock: false}, "new.nc", 10, false, "")
+	e, err := cacheFromUpload(strings.NewReader("gcode bytes"), "old.gcode", CacheKindPending)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < uploadRowsRendered+5; i++ {
-		RecordUpload(&GcodeUse{HasBlock: false}, fmt.Sprintf("n%02d.nc", i), 10, false, "")
+	e.Time = time.Now().Add(-48 * time.Hour)
+	e.Reason = "printer is not available: snapmaker.fritz.box"
+	MigratePending()
+
+	if l.Len() != 2 {
+		t.Fatalf("%d rows, want 2", l.Len())
 	}
+	newest, oldest := l.Recent(2)[0], l.Recent(2)[1]
+	if newest.File != "new.nc" || oldest.File != "old.gcode" {
+		t.Errorf("order = %s, %s; the migrated row belongs at its old time", newest.File, oldest.File)
+	}
+	if !oldest.Stored || oldest.FileID != e.ID || oldest.UploadError == "" {
+		t.Errorf("migrated row = %+v", oldest)
+	}
+	if got, _ := CacheGet(e.ID); !got.Held() {
+		t.Error("the entry is still pending")
+	}
+	if len(cacheLegacyPending()) != 0 {
+		t.Error("migration must run only once")
+	}
+	h := uploadsHTML()
+	if !strings.Contains(h, "tag-err") || !strings.Contains(h, ">Print</button>") {
+		t.Error("the migrated row should show the warning tag and Print")
+	}
+	if strings.Contains(h, "/cache/") {
+		t.Error("the table still carries cache-only actions")
+	}
+	ApplyRetention()
 	if !fileExists(t, cacheDataPath(e.ID)) {
-		t.Error("cached upload was pruned although the table still shows it")
-	}
-	if n := len(CachePending()); n != 1 {
-		t.Errorf("pending entries = %d, want 1", n)
+		t.Error("retention deleted the copy of a visible row")
 	}
 }
 

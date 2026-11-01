@@ -110,6 +110,21 @@ heating sequence runs and the file becomes the active job. Afterwards `/status` 
 the printer really loaded that file; if it reports a different one, the upload is reported as failed
 instead of a false "Upload finished".
 
+## Upload without start: kept on sm2uploader only
+
+A slicer *Upload* without `print=true` (or the GUI without the checkbox) does **not** go to the
+printer — the Snapmaker does not keep files sent over WiFi anyway. The file is stored next to the
+ledger and gets open rows at 0 g, marked **only sm2**. *Print* in the row's ⋯ menu sends it later,
+starts it and books those same rows.
+
+An Upload+Start that never got the file onto the printer (offline, busy, touchscreen authorization
+timed out) ends up exactly the same way, with the reason as a ⚠ on the tag. The slicer still gets
+HTTP 200, otherwise it throws the export away. Nothing is retried automatically.
+
+The ⋯ menu of a row also holds *Print again*, *Change filament …* (refund on the old spool, the
+same grams on the new one) and *Delete* (removes the upload and its copy from the table; Spoolman
+bookings stay untouched — cancel first to refund).
+
 ## Token persistence
 
 The printer token is written to `knownhosts` as soon as it is (re)obtained, not only on a clean
@@ -249,11 +264,14 @@ Put the container on the same Docker network as Spoolman, or the hostname will n
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/` | the web GUI |
-| `POST` | `/api/files/local` | slicer upload (OctoPrint API); honours `print=true` |
+| `POST` | `/api/files/local` | slicer upload (OctoPrint API); honours `print=true`; without it the file is only stored |
 | `GET` | `/api/version` | OctoPrint handshake for slicers |
 | `GET` | `/log` | recent log rows, for the page's own polling |
 | `GET` | `/uploads` | the upload table, for the page's own polling |
 | `POST` | `/book` | set / book / cancel one row. **POST only**, by design |
+| `POST` | `/row/print` | send a row's kept file to the printer and start it (*Print* / *Print again*) |
+| `POST` | `/row/spool` | move a row to another spool, rebooking its grams |
+| `POST` | `/row/delete` | remove an upload (all its rows) and its file copy |
 
 ## Building and testing
 

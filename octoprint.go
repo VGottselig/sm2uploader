@@ -82,6 +82,7 @@ h2 .hint{text-transform:none;letter-spacing:0;font-weight:400;color:#6b7280}
 .tbl .file{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tbl .dim{color:#6b7280}
 .tbl .tag{display:inline-block;background:#1e3a5f;color:#93c5fd;border-radius:4px;padding:0 5px;margin-right:6px;font-size:11px;line-height:17px}
+.tbl .tag-err{background:#3a2c08;color:#fcd34d;cursor:help}
 .tbl .warn{color:#fbbf24}
 .tbl .neg{color:#f87171;font-weight:700}
 .tbl .st-err{color:#f87171;cursor:help;margin-left:5px;font-weight:700}
@@ -356,79 +357,6 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		http.Redirect(w, r, "/?ok="+url.QueryEscape("Deleted: "+row.File), http.StatusSeeOther)
 	})
 
-	// /cache/delete drops a failed upload that is not wanted any more.
-	mux.HandleFunc("/cache/delete", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			methodNotAllowedResponse(w, r.Method)
-			return
-		}
-		id := r.FormValue("id")
-		entry, ok := CacheGet(id)
-		if !ok {
-			http.Redirect(w, r, "/?err="+url.QueryEscape("cache entry: unknown id "+id), http.StatusSeeOther)
-			return
-		}
-		file := entry.File
-		if err := CacheDelete(id); err != nil {
-			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
-			return
-		}
-		log.Printf("Deleted cached upload: %s", file)
-		http.Redirect(w, r, "/?ok="+url.QueryEscape("Deleted: "+file), http.StatusSeeOther)
-	})
-
-	// /cache/upload sends a cached file again and starts the print. It creates a
-	// normal ledger row on success, then drops the cache entry.
-	mux.HandleFunc("/cache/upload", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			methodNotAllowedResponse(w, r.Method)
-			return
-		}
-		id := r.FormValue("id")
-		entry, ok := CacheGet(id)
-		if !ok {
-			http.Redirect(w, r, "/?err="+url.QueryEscape("cache entry: unknown id "+id), http.StatusSeeOther)
-			return
-		}
-		f, err := CacheOpen(entry)
-		if err != nil {
-			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
-			return
-		}
-		defer f.Close()
-		info, err := f.Stat()
-		if err != nil {
-			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
-			return
-		}
-
-		gcodeUse, perr := ParseGcodeUse(f)
-		if perr != nil {
-			log.Printf("Warning: could not read the consumption block of '%s': %s", entry.File, perr)
-		}
-
-		log.Printf("Uploading cached file '%s' [%s]", entry.File, humanReadableSize(info.Size()))
-		payload := NewPayload(f, entry.File, info.Size())
-		err = Connector.Upload(printer, payload, true)
-		if payload.Uploaded {
-			// The file is on the printer now, so it stops being a failed upload and
-			// becomes the copy behind the new row -- which keeps "Print again" alive
-			// for as long as that row is in the table.
-			if merr := CacheMarkHeld(entry); merr != nil {
-				log.Printf("Cache: %s", merr)
-			}
-			RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started, entry.ID)
-		}
-		if err != nil {
-			CacheSetError(entry, err)
-			_stats.addFailure(entry.File, info.Size())
-			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
-			return
-		}
-		_stats.addSuccess(entry.File, info.Size())
-		http.Redirect(w, r, "/?ok="+url.QueryEscape("Uploaded from cache: "+entry.File), http.StatusSeeOther)
-	})
-
 	// /row/print sends the G-code of an already printed row to the printer again.
 	// That is a full new print: it books the filament again and writes a new row,
 	// the old row keeps its own booking. Both point at the same cached copy, which
@@ -481,6 +409,8 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			} else {
 				RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started, entry.ID)
 			}
+		} else if row.Stored {
+			MarkUploadError(row.UploadID, err)
 		}
 		if err != nil {
 			_stats.addFailure(entry.File, info.Size())
@@ -593,7 +523,7 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 				internalServerErrorResponse(w, msg)
 				return
 			}
-			RecordStored(gcodeUse, payload.Name, fd.Size, fileID)
+			RecordStored(gcodeUse, payload.Name, fd.Size, fileID, "")
 			_stats.addSuccess(payload.Name, fd.Size)
 			log.Printf("Stored on sm2uploader only, NOT sent to the printer: %s [%s] -- print it from the uploads table",
 				fd.Filename, humanReadableSize(fd.Size))
@@ -618,32 +548,29 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started, fileID)
 		}
 
-		// Every failed upload is kept, not just the offline case -- otherwise the
-		// file is gone on "printer busy", a declined touchscreen authorization or
-		// an error in the printer's file store. Orca still gets 200, because a
-		// failure there throws the slice export away; log, banner and table say
-		// unmistakably that nothing arrived at the printer. Nothing is retried
-		// automatically, the user sends it again from the table.
+		// An Upload+Start that never got the file onto the printer ends up exactly
+		// like an Upload without start: stored on sm2uploader, open rows at 0 g,
+		// "Print" in the menu -- plus the reason on the row. Orca still gets 200,
+		// because a failure there throws the slice export away; log, banner and
+		// table say unmistakably that nothing arrived at the printer. Nothing is
+		// retried automatically.
 		//
 		// Two cases stay out: payload.Uploaded (the file IS on the printer, only
-		// the start failed -- a second "Upload" would print it twice) and an
-		// empty or oversized file (the fault is in the file, an entry would be a
-		// dead end).
-		if shouldCache(err, payload) {
-			entry, cerr := cacheFromUpload(file, payload.Name, CacheKindPending)
-			if cerr != nil {
-				log.Printf("Caching '%s' failed: %s", payload.Name, cerr)
-			} else {
-				CacheSetReason(entry, err)
-				_stats.addFailure(payload.Name, entry.Size)
-				msg := fmt.Sprintf("%s -- '%s' [%s] was CACHED, it is NOT on the printer. Upload it by hand from the uploads table.",
-					cacheReason(err), entry.File, humanReadableSize(entry.Size))
+		// the start failed -- sending it again would print it twice) and an empty
+		// or oversized file (the fault is in the file, a row would be a dead end).
+		if shouldStore(err, payload) {
+			if fileID := keepPrintedFile(file, payload.Name); fileID != "" {
+				reason := uploadFailure(err)
+				RecordStored(gcodeUse, payload.Name, fd.Size, fileID, reason)
+				_stats.addFailure(payload.Name, fd.Size)
+				msg := fmt.Sprintf("%s -- '%s' [%s] is stored on sm2uploader only, it is NOT on the printer. Print it from the uploads table.",
+					reason, fd.Filename, humanReadableSize(fd.Size))
 				log.Print(msg)
 				if gui {
 					http.Redirect(w, r, "/?warn="+url.QueryEscape(msg), http.StatusSeeOther)
 					return
 				}
-				writeResponse(w, http.StatusOK, `{"done": true, "cached": true}`)
+				writeResponse(w, http.StatusOK, `{"done": true, "stored": true}`)
 				return
 			}
 		}
@@ -700,18 +627,18 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 	return http.Serve(listener, handler)
 }
 
-// shouldCache says whether a failed upload belongs in the cache. The two
+// shouldStore says whether a failed upload becomes a stored row. The two
 // exceptions are explained at the call site.
-func shouldCache(err error, payload *Payload) bool {
+func shouldStore(err error, payload *Payload) bool {
 	if err == nil || !CacheEnabled() || payload.Uploaded {
 		return false
 	}
 	return !errors.Is(err, errFileEmpty) && !errors.Is(err, errFileTooLarge)
 }
 
-// cacheReason phrases the failure so it reads as the start of a sentence in log,
-// banner and table. "Printer offline" stays literal, that message is known.
-func cacheReason(err error) string {
+// uploadFailure phrases the failure so it reads as the start of a sentence in
+// log, banner and table. "Printer offline" stays literal, that message is known.
+func uploadFailure(err error) string {
 	if errors.Is(err, errPrinterUnavailable) {
 		return "Printer offline"
 	}
