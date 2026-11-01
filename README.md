@@ -94,7 +94,7 @@ Everything below only exists in this fork. All of it hangs off the OctoPrint ser
 Open the OctoPrint address in a browser (e.g. `http://localhost:8844`) and you get more than the
 slicer endpoint:
 
-- an **upload form** with an optional *Start print immediately* checkbox
+- an **upload form** (below the filament stock) with an optional *Start print immediately* checkbox
 - the **recent log**, colour-coded, refreshing itself every 3 s — no manual reload
 - the **upload table** described below, refreshing every 5 s
 
