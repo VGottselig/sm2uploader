@@ -234,6 +234,36 @@ func (s *Spoolman) PricePerG(spoolID int) float64 {
 	return 0
 }
 
+// SpoolByID looks a spool up in a fresh list (bookings must not act on a stale
+// cache). nil without an error means it is not there -- deleted or archived.
+func (s *Spoolman) SpoolByID(id int) (*SmSpool, error) {
+	spools, err := s.Spools()
+	if err != nil {
+		return nil, err
+	}
+	for i := range spools {
+		if spools[i].ID == id {
+			return &spools[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// CachedSpool is the render-path lookup of one spool (30 s cache, never blocks
+// the page for long). nil when unknown.
+func (s *Spoolman) CachedSpool(id int) *SmSpool {
+	if id == 0 {
+		return nil
+	}
+	for _, sp := range s.cachedSpools() {
+		if sp.ID == id {
+			sp := sp
+			return &sp
+		}
+	}
+	return nil
+}
+
 // RemainingByPreset is the current remaining weight of the spool behind a preset
 // name, for rows that were never booked (their booking is 0, so it is the same
 // value). Read-only: it never creates anything.

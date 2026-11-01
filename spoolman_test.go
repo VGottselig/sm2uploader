@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,9 +19,11 @@ type fakeSpoolman struct {
 	vendors []SmVendor
 	fields  []map[string]string
 
-	posted map[string]json.RawMessage // last body per "METHOD path"
-	calls  map[string]int
-	uses   []float64 // every use_weight delta, in order
+	posted  map[string]json.RawMessage // last body per "METHOD path"
+	calls   map[string]int
+	uses    []float64       // every use_weight delta, in order
+	useIDs  []string        // the spool ID of every use call, same order as uses
+	failUse map[string]bool // spool IDs whose use call answers 400
 }
 
 func newFake(t *testing.T) *fakeSpoolman {
@@ -82,15 +85,27 @@ func (f *fakeSpoolman) handle(w http.ResponseWriter, r *http.Request) {
 			UseWeight float64 `json:"use_weight"`
 		}
 		json.Unmarshal(body, &use)
+		sid := strings.TrimSuffix(strings.TrimPrefix(path, "/spool/"), "/use")
+		if f.failUse[sid] {
+			http.Error(w, `{"message":"rejected"}`, http.StatusBadRequest)
+			return
+		}
 		f.uses = append(f.uses, use.UseWeight)
+		f.useIDs = append(f.useIDs, sid)
 		if len(f.spools) == 0 {
 			f.spools = []SmSpool{{ID: 22, InitialWeight: f64(1000)}}
 		}
-		f.spools[0].UsedWeight += use.UseWeight
-		if f.spools[0].UsedWeight < 0 { // Spoolman clamps silently at 0
-			f.spools[0].UsedWeight = 0
+		i := 0 // unknown IDs land on the first spool, as before
+		for j := range f.spools {
+			if strconv.Itoa(f.spools[j].ID) == sid {
+				i = j
+			}
 		}
-		json.NewEncoder(w).Encode(f.spools[0])
+		f.spools[i].UsedWeight += use.UseWeight
+		if f.spools[i].UsedWeight < 0 { // Spoolman clamps silently at 0
+			f.spools[i].UsedWeight = 0
+		}
+		json.NewEncoder(w).Encode(f.spools[i])
 	case r.Method == http.MethodGet && path == "/setting/currency":
 		// The value is double JSON encoded on purpose -- like the real API.
 		json.NewEncoder(w).Encode(map[string]any{"value": `"CHF"`, "is_set": true})

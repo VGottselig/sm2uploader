@@ -108,8 +108,8 @@ func writeUploadRow(b *strings.Builder, r UploadRow) {
 		b.WriteString(`<td class="dim">no consumption block</td>`)
 		b.WriteString(`<td class="num dim">—</td><td class="num dim">—</td><td class="num dim">—</td>`)
 		b.WriteString(`<td class="dim">—</td><td class="num dim">—</td>`)
-		if btn := reprintHTML(r); btn != "" {
-			b.WriteString(`<td class="act">` + btn + `</td>`)
+		if menu := rowMenuHTML(r); menu != "" {
+			b.WriteString(`<td class="act">` + menu + `</td>`)
 		} else {
 			b.WriteString(`<td class="dim">—</td>`)
 		}
@@ -117,7 +117,7 @@ func writeUploadRow(b *strings.Builder, r UploadRow) {
 		return
 	}
 
-	b.WriteString(`<td>` + swatchHTML(r.Colour) + html.EscapeString(r.Preset) + `</td>`)
+	b.WriteString(`<td>` + filamentHTML(r) + spoolChangeHTML(r) + `</td>`)
 	b.WriteString(`<td class="num">` + strconv.Itoa(r.GcodeG) + `</td>`)
 
 	// Editable booked amount; the buttons live in the last cell and reach this
@@ -132,10 +132,10 @@ func writeUploadRow(b *strings.Builder, r UploadRow) {
 	b.WriteString(`<td class="nw">` + html.EscapeString(r.PrintTime) + `</td>`)
 	b.WriteString(`<td class="num">` + costHTML(r) + `</td>`)
 
-	// Exactly one action shows at a time, driven by the amount in the field:
-	// 0 -> Book, == G-code -> Cancel, else -> Set. Rendered correct up front
-	// (no flash, works without JS); sm2act() in the page keeps it in sync while
-	// the user types.
+	// Exactly one booking action shows at a time, driven by the amount in the
+	// field: 0 -> Book, == G-code -> Cancel, else -> Set. Rendered correct up
+	// front (no flash, works without JS); sm2act() in the page keeps it in sync
+	// while the user types. Everything rarer lives in the "⋯" menu next to it.
 	active := activeAct(r.BookedG, r.GcodeG)
 	b.WriteString(`<td class="act"><form id="` + formID + `" method="POST" action="/book">` +
 		`<input type="hidden" name="id" value="` + html.EscapeString(r.ID) + `">` +
@@ -143,12 +143,7 @@ func writeUploadRow(b *strings.Builder, r UploadRow) {
 		`<button data-act="set" name="action" value="set" title="book the amount entered"` + actHidden("set", active) + `>Set</button>` +
 		`<button data-act="cancel" name="action" value="cancel" class="danger" title="refund back to 0 g"` + actHidden("cancel", active) + `>Cancel</button>` +
 		`</form>`)
-	// The file is still in the cache while this row is in the table, so it can go
-	// to the printer a second time. That is a full new print: it books again, in a
-	// new row.
-	if btn := reprintHTML(r); btn != "" {
-		b.WriteString(btn)
-	}
+	b.WriteString(rowMenuHTML(r))
 	b.WriteString(`</td>`)
 	b.WriteString(`</tr>`)
 }
@@ -173,6 +168,92 @@ func writeCacheRow(b *strings.Builder, c CacheEntry) {
 		`<button type="submit" title="upload to the printer and start the print">Upload</button>` +
 		`</form></td>`)
 	b.WriteString(`</tr>`)
+}
+
+// rowMenuHTML is the "⋯" menu of a row: the actions that are needed now and then
+// and would otherwise crowd the cell. A native <details>, so it opens without
+// JS; the page script only closes it on an outside click and flips it upwards
+// near the bottom of the table. No entries, no menu.
+func rowMenuHTML(r UploadRow) string {
+	var items []string
+	// The file is still in the cache while this row is in the table, so it can go
+	// to the printer a second time. That is a full new print: it books again, in a
+	// new row.
+	if btn := reprintHTML(r); btn != "" {
+		items = append(items, btn)
+	}
+	if spoolChangeHTML(r) != "" {
+		items = append(items, `<button type="button" data-chg title="book this row on another spool">Change filament …</button>`)
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	return `<details class="more"><summary title="more actions">⋯</summary><div class="menu">` +
+		strings.Join(items, "") + `</div></details>`
+}
+
+// filamentHTML is the filament cell's label. A spool chosen by hand shows that
+// spool (name and colour from Spoolman) -- the preset from the G-code would be
+// the wrong answer then; it stays available as the tooltip.
+func filamentHTML(r UploadRow) string {
+	if r.SpoolManual && TheSpoolman != nil {
+		if sp := TheSpoolman.CachedSpool(r.SpoolID); sp != nil {
+			return `<span class="fl" title="chosen by hand — G-code preset: ` + html.EscapeString(r.Preset) + `">` +
+				`<span class="sw" style="` + swatchStyle(sp.Filament) + `"></span>` +
+				html.EscapeString(spoolName(*sp)) + ` <span class="dim">✎</span></span>`
+		}
+	}
+	return `<span class="fl">` + swatchHTML(r.Colour) + html.EscapeString(r.Preset) + `</span>`
+}
+
+// spoolChangeHTML is the hidden spool picker inside the filament cell. "Change
+// filament …" in the menu reveals it; only OK posts, so nothing is rebooked by
+// accident. Empty when there is nothing to choose from.
+func spoolChangeHTML(r UploadRow) string {
+	if r.NoFilament || TheSpoolman == nil {
+		return ""
+	}
+	spools := TheSpoolman.cachedSpools()
+	if len(spools) == 0 {
+		return ""
+	}
+	current := r.SpoolID
+	if current == 0 || (!r.SpoolManual && r.BookedG == 0) {
+		if sp := pickSpool(spools, r.Preset); sp != nil {
+			current = sp.ID
+		}
+	}
+
+	type opt struct {
+		id   int
+		name string
+	}
+	var opts []opt
+	for _, sp := range spools {
+		if sp.Archived {
+			continue
+		}
+		name := spoolName(sp)
+		if rem, ok := RemainingG(&sp); ok {
+			name += " — " + strconv.Itoa(int(math.Round(rem))) + " g"
+		}
+		opts = append(opts, opt{sp.ID, name})
+	}
+	sort.SliceStable(opts, func(i, j int) bool { return strings.ToLower(opts[i].name) < strings.ToLower(opts[j].name) })
+
+	var b strings.Builder
+	b.WriteString(`<form class="chg" method="POST" action="/row/spool" hidden>` +
+		`<input type="hidden" name="id" value="` + html.EscapeString(r.ID) + `"><select name="spool">`)
+	for _, o := range opts {
+		sel := ""
+		if o.id == current {
+			sel = " selected"
+		}
+		b.WriteString(`<option value="` + strconv.Itoa(o.id) + `"` + sel + `>` + html.EscapeString(o.name) + `</option>`)
+	}
+	b.WriteString(`</select><button type="submit" title="refund on the old spool, book on this one">OK</button>` +
+		`<button type="button" data-chg-back>Back</button></form>`)
+	return b.String()
 }
 
 // reprintHTML is the "Print again" button for a printed row whose G-code copy is
@@ -231,6 +312,10 @@ func remainingHTML(r UploadRow) string {
 	)
 	if r.RemainingAfterG != nil {
 		value, known = float64(*r.RemainingAfterG), true
+	} else if TheSpoolman != nil && r.SpoolManual {
+		if sp := TheSpoolman.CachedSpool(r.SpoolID); sp != nil {
+			value, known = RemainingG(sp)
+		}
 	} else if TheSpoolman != nil && r.Preset != "" {
 		value, known = TheSpoolman.RemainingByPreset(r.Preset)
 	}
