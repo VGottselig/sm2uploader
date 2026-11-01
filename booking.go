@@ -19,14 +19,26 @@ var SpoolmanLowG = 100
 // read-modify-write of booked_g safe.
 var bookMu sync.Mutex
 
+// RecordStored writes the rows for an Orca "Upload" without start: the file was
+// kept on sm2uploader only and never sent to the printer. The rows are open at
+// 0 g -- the same state as after a cancel -- with the spool already resolved.
+func RecordStored(use *GcodeUse, name string, size int64, fileID string) {
+	recordRows(use, name, size, false, fileID, true)
+}
+
 // RecordUpload writes the ledger rows for a finished upload and, when the print
 // was actually started, books the consumption right away.
+func RecordUpload(use *GcodeUse, name string, size int64, started bool, fileID string) {
+	recordRows(use, name, size, started, fileID, false)
+}
+
+// recordRows is the body of RecordUpload and RecordStored.
 //
 // Only successful uploads get a row. If the upload landed but the start failed,
 // the row stays open (status "offen") and the user books it from the table.
 // fileID is the cached copy of the very file that was sent ("" when no copy could
 // be kept); all rows of the upload share it, so any of them can print again.
-func RecordUpload(use *GcodeUse, name string, size int64, started bool, fileID string) {
+func recordRows(use *GcodeUse, name string, size int64, started bool, fileID string, stored bool) {
 	now := time.Now().In(berlinLoc())
 	uploadID := newUploadID(now)
 
@@ -38,6 +50,7 @@ func RecordUpload(use *GcodeUse, name string, size int64, started bool, fileID s
 			ID: uploadID + "-T-", UploadID: uploadID, Time: now, File: name, Size: size,
 			FileID: fileID,
 			Slot:   -1, Status: StatusOpen, NoFilament: true,
+			Stored: stored,
 		})
 	} else {
 		for _, slot := range use.Slots {
@@ -48,6 +61,7 @@ func RecordUpload(use *GcodeUse, name string, size int64, started bool, fileID s
 				File:      name,
 				Size:      size,
 				FileID:    fileID,
+				Stored:    stored,
 				Slot:      slot.Slot,
 				Preset:    slot.Preset,
 				Colour:    slot.Colour,
@@ -81,6 +95,9 @@ func RecordUpload(use *GcodeUse, name string, size int64, started bool, fileID s
 		}
 		log.Printf("Upload recorded: %s T%d %s -- %d g from the G-Code", r.File, r.Slot, r.Preset, r.GcodeG)
 	}
+	if stored && fileID == "" {
+		log.Printf("Ledger: stored upload '%s' has no file copy -- it cannot be printed from the table", name)
+	}
 
 	if TheSpoolman == nil {
 		log.Printf("Spoolman not configured (SPOOLMAN_URL) -- rows stay open")
@@ -104,6 +121,57 @@ func RecordUpload(use *GcodeUse, name string, size int64, started bool, fileID s
 			log.Printf("Spoolman: booking %d g for '%s' T%d failed: %s", r.GcodeG, r.File, r.Slot, err)
 		}
 	}
+}
+
+// PrintedStored finishes a stored upload once "Print" got it onto the printer:
+// every row of the upload stops being "stored", and when the print really
+// started each row that still holds 0 g is booked with its G-code amount -- the
+// same booking Upload+Start would have made. A row the user already booked by
+// hand is left alone. A failed booking only marks its row, like RecordUpload.
+func PrintedStored(uploadID string, started bool) {
+	if TheLedger == nil {
+		return
+	}
+	rows := TheLedger.UploadRows(uploadID)
+	for _, r := range rows {
+		if err := TheLedger.Update(r.ID, func(row *UploadRow) { row.Stored = false }); err != nil {
+			log.Printf("Ledger: %s", err)
+		}
+	}
+	if !started || TheSpoolman == nil {
+		return
+	}
+	for _, r := range rows {
+		if r.NoFilament || r.BookedG != 0 {
+			continue
+		}
+		if err := BookRow(r.ID, r.GcodeG); err != nil {
+			log.Printf("Spoolman: booking %d g for '%s' T%d failed: %s", r.GcodeG, r.File, r.Slot, err)
+		}
+	}
+}
+
+// DeleteUpload removes an upload from the table: all its rows (one per slot) and,
+// through the retention rule, the file copy nothing points at any more.
+// Bookings in Spoolman are deliberately left alone -- a printed job did use the
+// filament; whoever wants it back cancels the row first.
+func DeleteUpload(rowID string) (UploadRow, int, error) {
+	bookMu.Lock() // no booking may write a row while it disappears
+	defer bookMu.Unlock()
+	if TheLedger == nil {
+		return UploadRow{}, 0, fmt.Errorf("no ledger")
+	}
+	row, ok := TheLedger.Get(rowID)
+	if !ok {
+		return UploadRow{}, 0, fmt.Errorf("row %q unknown", rowID)
+	}
+	n, err := TheLedger.RemoveUpload(row.UploadID)
+	if err != nil {
+		return row, 0, err
+	}
+	log.Printf("Deleted from the table: %s (%d row(s); Spoolman bookings unchanged)", row.File, n)
+	ApplyRetention()
+	return row, n, nil
 }
 
 // ensureSpools resolves the spool for every row -- creating filament and spool
