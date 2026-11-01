@@ -222,16 +222,17 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			`<div class="meta">printer <b>` + html.EscapeString(printer.ID) + `</b> @ ` +
 			html.EscapeString(printer.IP) + ` · ` + protocol + `</div>` +
 			banner +
+			`<h2>Uploads <span class="hint">` + uploadsHint() + `</span></h2>` +
+			`<div id="uploads">` + uploadsHTML() + `</div>` +
+			`<h2>Filament <span class="hint">(remaining, emptiest first)</span></h2>` +
+			`<div id="stock">` + stockHTML() + `</div>` +
+			`<h2>Manual upload</h2>` +
 			`<form class="upload" method="POST" action="/api/files/local" enctype="multipart/form-data">` +
 			`<input type="hidden" name="gui" value="1">` +
 			`<input type="file" name="file" accept=".gcode,.gco,.g,.nc" required>` +
 			`<label title="unchecked: kept on sm2uploader only, print it later from the table"><input type="checkbox" name="print" value="true"> Start print immediately</label>` +
 			`<button type="submit">Upload</button>` +
 			`</form>` +
-			`<h2>Uploads <span class="hint">` + uploadsHint() + `</span></h2>` +
-			`<div id="uploads">` + uploadsHTML() + `</div>` +
-			`<h2>Filament <span class="hint">(remaining, emptiest first)</span></h2>` +
-			`<div id="stock">` + stockHTML() + `</div>` +
 			`<h2>Status</h2><pre class="stats">` + html.EscapeString(_stats.StatsText()) + `</pre>` +
 			`<h2>Log <span class="hint">(newest first, auto-refreshing)</span></h2>` +
 			`<div class="log">` + LogRing.HTML() + `</div>` +
