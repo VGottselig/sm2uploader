@@ -81,6 +81,7 @@ h2 .hint{text-transform:none;letter-spacing:0;font-weight:400;color:#6b7280}
 .tbl .nw{white-space:nowrap}
 .tbl .file{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tbl .dim{color:#6b7280}
+.tbl .tag{display:inline-block;background:#1e3a5f;color:#93c5fd;border-radius:4px;padding:0 5px;margin-right:6px;font-size:11px;line-height:17px}
 .tbl .warn{color:#fbbf24}
 .tbl .neg{color:#f87171;font-weight:700}
 .tbl .st-err{color:#f87171;cursor:help;margin-left:5px;font-weight:700}
@@ -107,6 +108,8 @@ h2 .hint{text-transform:none;letter-spacing:0;font-weight:400;color:#6b7280}
 .tbl .act .menu form+form{margin-left:0}
 .tbl .act .menu button{display:block;width:100%;text-align:left;background:transparent;padding:6px 10px;font-size:13px}
 .tbl .act .menu button:hover{background:#374151}
+.tbl .act .menu button.danger{color:#fca5a5}
+.tbl .act .menu button.danger:hover{background:#7f1d1d;color:#fff}
 .tbl form.chg:not([hidden]){display:inline-flex;gap:6px;align-items:center;margin:0}
 .tbl form.chg select{background:#1b1b1d;color:#e0e0e0;border:1px solid #4b5563;border-radius:4px;padding:3px 5px;font-size:13px;max-width:260px}
 .tbl form.chg button{background:#374151;color:#e5e7eb;border:0;border-radius:5px;padding:4px 9px;font-size:12px;cursor:pointer}
@@ -221,7 +224,7 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			`<form class="upload" method="POST" action="/api/files/local" enctype="multipart/form-data">` +
 			`<input type="hidden" name="gui" value="1">` +
 			`<input type="file" name="file" accept=".gcode,.gco,.g,.nc" required>` +
-			`<label><input type="checkbox" name="print" value="true"> Start print immediately</label>` +
+			`<label title="unchecked: kept on sm2uploader only, print it later from the table"><input type="checkbox" name="print" value="true"> Start print immediately</label>` +
 			`<button type="submit">Upload</button>` +
 			`</form>` +
 			`<h2>Uploads <span class="hint">` + uploadsHint() + `</span></h2>` +
@@ -338,6 +341,42 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		http.Redirect(w, r, "/?ok="+url.QueryEscape(msg), http.StatusSeeOther)
 	})
 
+	// /row/delete removes an upload (all its slot rows) and its file copy from the
+	// table. Spoolman bookings stay as they are.
+	mux.HandleFunc("/row/delete", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowedResponse(w, r.Method)
+			return
+		}
+		row, _, err := DeleteUpload(r.FormValue("id"))
+		if err != nil {
+			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+			return
+		}
+		http.Redirect(w, r, "/?ok="+url.QueryEscape("Deleted: "+row.File), http.StatusSeeOther)
+	})
+
+	// /cache/delete drops a failed upload that is not wanted any more.
+	mux.HandleFunc("/cache/delete", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowedResponse(w, r.Method)
+			return
+		}
+		id := r.FormValue("id")
+		entry, ok := CacheGet(id)
+		if !ok {
+			http.Redirect(w, r, "/?err="+url.QueryEscape("cache entry: unknown id "+id), http.StatusSeeOther)
+			return
+		}
+		file := entry.File
+		if err := CacheDelete(id); err != nil {
+			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+			return
+		}
+		log.Printf("Deleted cached upload: %s", file)
+		http.Redirect(w, r, "/?ok="+url.QueryEscape("Deleted: "+file), http.StatusSeeOther)
+	})
+
 	// /cache/upload sends a cached file again and starts the print. It creates a
 	// normal ledger row on success, then drops the cache entry.
 	mux.HandleFunc("/cache/upload", func(w http.ResponseWriter, r *http.Request) {
@@ -435,7 +474,13 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 		payload := NewPayload(f, entry.File, info.Size())
 		err = Connector.Upload(printer, payload, true)
 		if payload.Uploaded {
-			RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started, entry.ID)
+			if row.Stored {
+				// First print of a stored upload: its own rows get the booking,
+				// no new row.
+				PrintedStored(row.UploadID, payload.Started)
+			} else {
+				RecordUpload(gcodeUse, payload.Name, payload.Size, payload.Started, entry.ID)
+			}
 		}
 		if err != nil {
 			_stats.addFailure(entry.File, info.Size())
@@ -443,7 +488,11 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			return
 		}
 		_stats.addSuccess(entry.File, info.Size())
-		http.Redirect(w, r, "/?ok="+url.QueryEscape("Printing again: "+entry.File), http.StatusSeeOther)
+		verb := "Printing again: "
+		if row.Stored {
+			verb = "Printing: "
+		}
+		http.Redirect(w, r, "/?ok="+url.QueryEscape(verb+entry.File), http.StatusSeeOther)
 	})
 
 	mux.HandleFunc("/api/files/local", func(w http.ResponseWriter, r *http.Request) {
@@ -526,6 +575,36 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			log.Printf("Print start requested (print=%q)", r.FormValue("print"))
 		}
 		gui := r.FormValue("gui") == "1"
+
+		// Orca "Upload" (no start) does not go to the printer at all: the file is
+		// kept on sm2uploader and gets open rows at 0 g, printed later from the
+		// table. A plain upload to the printer is useless anyway -- the Snapmaker
+		// does not keep files sent over WiFi.
+		if !startRequested {
+			fileID := keepPrintedFile(file, payload.Name)
+			if fileID == "" {
+				msg := "could not store '" + payload.Name + "' on sm2uploader (cache disabled or not writable)"
+				log.Print(msg)
+				_stats.addFailure(payload.Name, fd.Size)
+				if gui {
+					http.Redirect(w, r, "/?err="+url.QueryEscape(msg), http.StatusSeeOther)
+					return
+				}
+				internalServerErrorResponse(w, msg)
+				return
+			}
+			RecordStored(gcodeUse, payload.Name, fd.Size, fileID)
+			_stats.addSuccess(payload.Name, fd.Size)
+			log.Printf("Stored on sm2uploader only, NOT sent to the printer: %s [%s] -- print it from the uploads table",
+				fd.Filename, humanReadableSize(fd.Size))
+			if gui {
+				http.Redirect(w, r, "/?ok="+url.QueryEscape("Stored (not sent to the printer): "+fd.Filename), http.StatusSeeOther)
+				return
+			}
+			writeResponse(w, http.StatusOK, `{"done": true}`)
+			return
+		}
+
 		err = Connector.Upload(printer, payload, startRequested)
 
 		// Only a successful upload produces a ledger row -- but "upload landed,

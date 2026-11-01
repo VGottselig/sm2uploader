@@ -102,7 +102,7 @@ func writeUploadRow(b *strings.Builder, r UploadRow) {
 	formID := "f-" + r.ID
 	b.WriteString(`<tr>`)
 	b.WriteString(`<td class="nw">` + html.EscapeString(r.Time.In(berlinLoc()).Format("02 Jan 15:04")) + `</td>`)
-	b.WriteString(`<td class="file" title="` + html.EscapeString(r.File) + `">` + html.EscapeString(r.File) + `</td>`)
+	b.WriteString(`<td class="file" title="` + html.EscapeString(r.File) + `">` + storedTagHTML(r) + html.EscapeString(r.File) + `</td>`)
 
 	if r.NoFilament {
 		b.WriteString(`<td class="dim">no consumption block</td>`)
@@ -166,7 +166,8 @@ func writeCacheRow(b *strings.Builder, c CacheEntry) {
 	b.WriteString(`<td class="act"><form method="POST" action="/cache/upload">` +
 		`<input type="hidden" name="id" value="` + html.EscapeString(c.ID) + `">` +
 		`<button type="submit" title="upload to the printer and start the print">Upload</button>` +
-		`</form></td>`)
+		`</form>` + menuHTML([]string{deleteFormHTML("/cache/delete", c.ID, "Delete the cached "+c.File+"? It never reached the printer.")}) +
+		`</td>`)
 	b.WriteString(`</tr>`)
 }
 
@@ -185,11 +186,30 @@ func rowMenuHTML(r UploadRow) string {
 	if spoolChangeHTML(r) != "" {
 		items = append(items, `<button type="button" data-chg title="book this row on another spool">Change filament …</button>`)
 	}
+	ask := "Delete " + r.File + " from the table, with its file copy?"
+	if r.BookedG != 0 {
+		ask += " The booking stays in Spoolman -- cancel first to refund it."
+	}
+	items = append(items, deleteFormHTML("/row/delete", r.ID, ask))
+	return menuHTML(items)
+}
+
+// menuHTML wraps menu entries into the "⋯" dropdown.
+func menuHTML(items []string) string {
 	if len(items) == 0 {
 		return ""
 	}
 	return `<details class="more"><summary title="more actions">⋯</summary><div class="menu">` +
 		strings.Join(items, "") + `</div></details>`
+}
+
+// deleteFormHTML is the Delete entry. It asks first (the browser's confirm), so
+// a stray click in the menu removes nothing.
+func deleteFormHTML(action, id, ask string) string {
+	js := strings.NewReplacer("\\", "\\\\", "'", "\\'").Replace(ask)
+	return `<form method="POST" action="` + action + `" onsubmit="return confirm('` + html.EscapeString(js) + `')">` +
+		`<input type="hidden" name="id" value="` + html.EscapeString(id) + `">` +
+		`<button type="submit" class="danger" title="remove from the table">Delete</button></form>`
 }
 
 // filamentHTML is the filament cell's label. A spool chosen by hand shows that
@@ -265,10 +285,23 @@ func reprintHTML(r UploadRow) string {
 	if _, ok := CacheGet(r.FileID); !ok {
 		return ""
 	}
+	label, title := "Print again", "send this file to the printer again and start it (books the filament again)"
+	if r.Stored {
+		label, title = "Print", "send this file to the printer, start it and book this row"
+	}
 	return `<form method="POST" action="/row/print">` +
 		`<input type="hidden" name="id" value="` + html.EscapeString(r.ID) + `">` +
-		`<button type="submit" title="send this file to the printer again and start it (books the filament again)">Print again</button>` +
+		`<button type="submit" title="` + title + `">` + label + `</button>` +
 		`</form>`
+}
+
+// storedTagHTML flags a row whose file is on sm2uploader only -- an Orca "Upload"
+// without start that has not been printed yet.
+func storedTagHTML(r UploadRow) string {
+	if !r.Stored {
+		return ""
+	}
+	return `<span class="tag" title="stored on sm2uploader only, not sent to the printer">only sm2</span>`
 }
 
 // activeAct picks the single action to show for a booked amount, mirroring the

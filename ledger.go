@@ -59,6 +59,11 @@ type UploadRow struct {
 	// booking of the row then goes to SpoolID instead of resolving the preset.
 	SpoolManual bool `yaml:"spool_manual,omitempty"`
 
+	// Stored marks an Orca "Upload" without start: the file sits on sm2uploader
+	// only (FileID) and was never sent to the printer. "Print" in the row menu
+	// sends it and books this very row; afterwards the flag is gone.
+	Stored bool `yaml:"stored,omitempty"`
+
 	// NoFilament marks Luban/.nc/laser/CNC uploads: timestamp and file name
 	// only, no booking (no guessing from E moves).
 	NoFilament bool `yaml:"no_filament,omitempty"`
@@ -143,6 +148,38 @@ func (l *Ledger) Get(id string) (UploadRow, bool) {
 		}
 	}
 	return UploadRow{}, false
+}
+
+// UploadRows returns copies of all rows of one upload (one per filament slot).
+func (l *Ledger) UploadRows(uploadID string) []UploadRow {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []UploadRow
+	for _, r := range l.rows {
+		if r.UploadID == uploadID {
+			out = append(out, *r)
+		}
+	}
+	return out
+}
+
+// RemoveUpload drops every row of one upload and writes the file. Returns how
+// many rows went.
+func (l *Ledger) RemoveUpload(uploadID string) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kept := make([]*UploadRow, 0, len(l.rows))
+	for _, r := range l.rows {
+		if r.UploadID != uploadID {
+			kept = append(kept, r)
+		}
+	}
+	n := len(l.rows) - len(kept)
+	if n == 0 {
+		return 0, nil
+	}
+	l.rows = kept
+	return n, l.saveLocked()
 }
 
 // Recent returns copies of the n newest rows, newest first. Copies, because the

@@ -29,8 +29,10 @@ import (
 // CacheDir is set from -cache / CACHE_DIR in main(); empty disables the cache.
 var CacheDir string
 
-// Entry kinds. A pending entry never reached the printer. A held entry is the
-// copy of a file that did; it is only kept so a visible row can print it again.
+// Entry kinds. A pending entry is a failed upload that never reached the
+// printer. A held entry belongs to a ledger row: the copy of a printed file, or
+// the file of an Orca "Upload" that was stored on sm2uploader only (row.Stored).
+// It is kept so a visible row can print it (again).
 const (
 	CacheKindPending = "pending"
 	CacheKindHeld    = "held"
@@ -199,6 +201,24 @@ func CachePrune(keep map[string]bool) (int, int64) {
 		bytes += e.Size
 	}
 	return n, bytes
+}
+
+// CacheDelete removes one failed upload by hand (the table's Delete). Held copies
+// are not touched here -- they go with their rows through CachePrune.
+func CacheDelete(id string) error {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	e, ok := cacheMap[id]
+	if !ok {
+		return fmt.Errorf("cache entry %s unknown", id)
+	}
+	if e.Held() {
+		return fmt.Errorf("cache entry %s belongs to a row -- delete the row instead", id)
+	}
+	delete(cacheMap, id)
+	os.Remove(cacheDataPath(id))
+	os.Remove(cacheMetaPath(id))
+	return nil
 }
 
 // CacheSetReason records why the upload failed in the first place. Separate from
