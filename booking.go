@@ -161,10 +161,7 @@ func BookRow(id string, targetG int) error {
 		return fmt.Errorf("SPOOLMAN_URL is not set")
 	}
 
-	spool, err := TheSpoolman.ResolveSpool(SlotUse{
-		Slot: row.Slot, Preset: row.Preset, Colour: row.Colour, Material: row.Material,
-		Vendor: row.Vendor, Density: row.Density, Diameter: row.Diameter, CostPerKg: row.CostPerKg,
-	})
+	spool, err := rowSpool(row)
 	if err != nil {
 		markFailure(id, err)
 		return err
@@ -205,6 +202,111 @@ func BookRow(id string, targetG int) error {
 		} else {
 			r.Status = StatusOpen
 		}
+	})
+}
+
+// rowSpool picks the spool a booking of this row goes to. A spool chosen by hand
+// (ChangeSpool) always wins. A row that already holds grams stays on the spool
+// they were booked on -- otherwise a refund after a spool change in Spoolman
+// (new spool of the same filament, newer last_used) would credit the wrong spool.
+// Everything else resolves through the preset as before. Caller holds bookMu.
+func rowSpool(row UploadRow) (*SmSpool, error) {
+	if row.SpoolID != 0 && (row.SpoolManual || row.BookedG != 0) {
+		sp, err := TheSpoolman.SpoolByID(row.SpoolID)
+		if err != nil {
+			return nil, err
+		}
+		if sp != nil {
+			return sp, nil
+		}
+		if row.SpoolManual {
+			return nil, fmt.Errorf("spool %d is no longer in Spoolman (archived?) -- choose another filament", row.SpoolID)
+		}
+		log.Printf("Spoolman: spool %d of %s T%d is gone, resolving through the preset", row.SpoolID, row.File, row.Slot)
+	}
+	return TheSpoolman.ResolveSpool(SlotUse{
+		Slot: row.Slot, Preset: row.Preset, Colour: row.Colour, Material: row.Material,
+		Vendor: row.Vendor, Density: row.Density, Diameter: row.Diameter, CostPerKg: row.CostPerKg,
+	})
+}
+
+// ChangeSpool moves a row to another spool. A booked row is refunded on its old
+// spool first and the same grams are then booked on the new one; an open row only
+// switches the spool. The preset mapping in Spoolman stays untouched -- this
+// corrects one row, not future uploads.
+//
+// Refund first: if it fails nothing has changed. If the second booking fails the
+// row is left open on the new spool and flagged, so "Book" finishes the job.
+func ChangeSpool(id string, spoolID int) error {
+	bookMu.Lock()
+	defer bookMu.Unlock()
+
+	if TheLedger == nil {
+		return fmt.Errorf("no ledger")
+	}
+	row, ok := TheLedger.Get(id)
+	if !ok {
+		return fmt.Errorf("row %q unknown", id)
+	}
+	if row.NoFilament {
+		return fmt.Errorf("row without filament data has no spool")
+	}
+	if TheSpoolman == nil {
+		return fmt.Errorf("SPOOLMAN_URL is not set")
+	}
+	target, err := TheSpoolman.SpoolByID(spoolID)
+	if err != nil {
+		return err
+	}
+	if target == nil {
+		return fmt.Errorf("spool %d not found in Spoolman", spoolID)
+	}
+	if row.SpoolID == spoolID && row.SpoolManual {
+		return nil // already there
+	}
+
+	amount := row.BookedG
+	if amount == 0 {
+		return TheLedger.Update(id, func(r *UploadRow) {
+			r.SpoolID, r.SpoolManual = spoolID, true
+			r.RemainingAfterG, r.Error, r.Status = nil, "", StatusOpen
+		})
+	}
+
+	old, err := rowSpool(row)
+	if err != nil {
+		return err
+	}
+	if old.ID == spoolID {
+		return TheLedger.Update(id, func(r *UploadRow) { r.SpoolID, r.SpoolManual = spoolID, true })
+	}
+	if _, err := TheSpoolman.Use(old.ID, -amount); err != nil {
+		return err
+	}
+	log.Printf("Spoolman: %s T%d -- %d g refunded on spool %d (filament change)", row.File, row.Slot, amount, old.ID)
+	if err := TheLedger.Update(id, func(r *UploadRow) {
+		r.BookedG, r.SpoolID, r.SpoolManual = 0, spoolID, true
+		r.RemainingAfterG, r.Status, r.Error = nil, StatusOpen, ""
+	}); err != nil {
+		return err
+	}
+
+	warnLowStock(target, spoolName(*target), amount)
+	booked, err := TheSpoolman.Use(spoolID, amount)
+	if err != nil {
+		markFailure(id, fmt.Errorf("refunded on the old spool, booking on the new one failed: %w", err))
+		return err
+	}
+	log.Printf("Spoolman: %s T%d -- %d g booked on spool %d (%s)", row.File, row.Slot, amount, spoolID, spoolName(*booked))
+
+	var remaining *int
+	if rem, ok := RemainingG(booked); ok {
+		v := int(math.Round(rem))
+		remaining = &v
+	}
+	now := time.Now().In(berlinLoc())
+	return TheLedger.Update(id, func(r *UploadRow) {
+		r.BookedG, r.RemainingAfterG, r.BookedAt, r.Status = amount, remaining, &now, StatusBooked
 	})
 }
 

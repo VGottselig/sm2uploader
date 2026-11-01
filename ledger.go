@@ -55,6 +55,10 @@ type UploadRow struct {
 	BookedAt        *time.Time `yaml:"booked_at,omitempty"`
 	Error           string     `yaml:"error,omitempty"`
 
+	// SpoolManual marks a spool chosen by hand in the table (ChangeSpool): every
+	// booking of the row then goes to SpoolID instead of resolving the preset.
+	SpoolManual bool `yaml:"spool_manual,omitempty"`
+
 	// NoFilament marks Luban/.nc/laser/CNC uploads: timestamp and file name
 	// only, no booking (no guessing from E moves).
 	NoFilament bool `yaml:"no_filament,omitempty"`

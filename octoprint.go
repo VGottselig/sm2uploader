@@ -23,8 +23,9 @@ const (
 )
 
 // pollScript keeps the log and the upload table current without a manual reload.
-// The table swap is skipped while the focus sits inside it -- otherwise the poll
-// would overwrite a gram correction the user is still typing.
+// The table swap is skipped while the focus sits inside it, a row menu is open or
+// a spool picker is showing -- otherwise the poll would overwrite what the user
+// is in the middle of.
 const pollScript = `
 function sm2act(inp){var v=parseInt(inp.value||'0',10);if(isNaN(v))v=0;var g=parseInt(inp.dataset.g||'0',10);if(isNaN(g))g=0;
 var a=(v===0)?'book':(v===g?'cancel':'set');
@@ -33,9 +34,19 @@ f.querySelectorAll('button[data-act]').forEach(function(btn){btn.style.display=(
 function sm2acts(){document.querySelectorAll('.tbl input.g').forEach(sm2act)}
 function sm2swap(url,sel,guard,after){fetch(url,{cache:'no-store'}).then(function(r){return r.text()}).then(function(h){
 var e=document.querySelector(sel);if(!e)return;
-if(guard&&e.contains(document.activeElement))return;
+if(guard&&(e.contains(document.activeElement)||e.querySelector('details.more[open],form.chg:not([hidden])')))return;
 e.innerHTML=h;if(after)after()}).catch(function(){})}
 document.addEventListener('input',function(e){if(e.target&&e.target.classList&&e.target.classList.contains('g'))sm2act(e.target)});
+function sm2close(keep){document.querySelectorAll('details.more[open]').forEach(function(d){if(d!==keep)d.open=false})}
+document.addEventListener('toggle',function(e){var d=e.target;if(!d.matches||!d.matches('details.more')||!d.open)return;
+sm2close(d);d.classList.remove('up');var m=d.querySelector('.menu'),c=d.closest('#uploads');
+if(m&&c&&m.getBoundingClientRect().bottom>c.getBoundingClientRect().bottom)d.classList.add('up')},true);
+document.addEventListener('click',function(e){var t=e.target;
+if(!t.closest('details.more'))sm2close(null);
+if(t.matches('[data-chg]')){var tr=t.closest('tr'),f=tr&&tr.querySelector('form.chg');if(!f)return;
+sm2close(null);f.hidden=false;tr.querySelector('.fl').hidden=true;f.querySelector('select').focus()}
+if(t.matches('[data-chg-back]')){var f2=t.closest('form.chg'),tr2=t.closest('tr');f2.reset();f2.hidden=true;tr2.querySelector('.fl').hidden=false}});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')sm2close(null)});
 setInterval(function(){sm2swap('/log','.log',false)},3000);
 setInterval(function(){sm2swap('/uploads','#uploads',true,sm2acts)},5000);
 setInterval(function(){sm2swap('/stock','#stock',false)},15000);
@@ -86,6 +97,20 @@ h2 .hint{text-transform:none;letter-spacing:0;font-weight:400;color:#6b7280}
 .tbl .act button{background:#374151;color:#e5e7eb;border:0;border-radius:5px;padding:4px 9px;font-size:12px;cursor:pointer;margin:0}
 .tbl .act button:hover{background:#4b5563}
 .tbl .act button.danger:hover{background:#991b1b}
+.tbl details.more{display:inline-block;position:relative;vertical-align:middle;margin-left:6px}
+.tbl details.more summary{list-style:none;cursor:pointer;background:#374151;color:#e5e7eb;border-radius:5px;padding:2px 9px;font-size:14px;line-height:20px;user-select:none}
+.tbl details.more summary::-webkit-details-marker{display:none}
+.tbl details.more summary:hover,.tbl details.more[open] summary{background:#4b5563}
+.tbl .menu{position:absolute;right:0;top:calc(100% + 4px);z-index:5;background:#26262a;border:1px solid #383840;border-radius:7px;padding:4px;display:flex;flex-direction:column;gap:2px;min-width:160px;box-shadow:0 6px 18px rgba(0,0,0,.45)}
+.tbl details.more.up .menu{top:auto;bottom:calc(100% + 4px)}
+.tbl .menu form{display:block;margin:0}
+.tbl .act .menu form+form{margin-left:0}
+.tbl .act .menu button{display:block;width:100%;text-align:left;background:transparent;padding:6px 10px;font-size:13px}
+.tbl .act .menu button:hover{background:#374151}
+.tbl form.chg:not([hidden]){display:inline-flex;gap:6px;align-items:center;margin:0}
+.tbl form.chg select{background:#1b1b1d;color:#e0e0e0;border:1px solid #4b5563;border-radius:4px;padding:3px 5px;font-size:13px;max-width:260px}
+.tbl form.chg button{background:#374151;color:#e5e7eb;border:0;border-radius:5px;padding:4px 9px;font-size:12px;cursor:pointer}
+.tbl form.chg button[type=submit]{background:#3b82f6;color:#fff}
 .empty{color:#6b7280;font-size:13px;margin:0}
 `
 
@@ -277,6 +302,40 @@ func startOctoPrintServer(listenAddr string, printer *Printer) error {
 			return
 		}
 		http.Redirect(w, r, "/?ok="+url.QueryEscape(fmt.Sprintf("%s T%d: %d g booked", row.File, row.Slot, target)), http.StatusSeeOther)
+	})
+
+	// /row/spool books a row on another spool: refund on the old one, the same
+	// grams on the new one (an open row only switches). POST only, like /book.
+	mux.HandleFunc("/row/spool", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowedResponse(w, r.Method)
+			return
+		}
+		id := r.FormValue("id")
+		row, ok := TheLedger.Get(id)
+		if !ok {
+			http.Redirect(w, r, "/?err="+url.QueryEscape("unknown row "+id), http.StatusSeeOther)
+			return
+		}
+		spoolID, err := strconv.Atoi(r.FormValue("spool"))
+		if err != nil || spoolID <= 0 {
+			http.Redirect(w, r, "/?err="+url.QueryEscape("invalid spool"), http.StatusSeeOther)
+			return
+		}
+		if err := ChangeSpool(id, spoolID); err != nil {
+			log.Printf("Filament change failed for %s: %s", id, err)
+			http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+			return
+		}
+		name := fmt.Sprintf("spool %d", spoolID)
+		if sp := TheSpoolman.CachedSpool(spoolID); sp != nil {
+			name = spoolName(*sp)
+		}
+		msg := fmt.Sprintf("%s T%d: filament changed to %s", row.File, row.Slot, name)
+		if row.BookedG > 0 {
+			msg += fmt.Sprintf(" (%d g rebooked)", row.BookedG)
+		}
+		http.Redirect(w, r, "/?ok="+url.QueryEscape(msg), http.StatusSeeOther)
 	})
 
 	// /cache/upload sends a cached file again and starts the print. It creates a
