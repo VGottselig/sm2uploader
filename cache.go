@@ -1,15 +1,15 @@
 package main
 
-// cache.go keeps the G-code the uploads table needs at hand: uploads that never
-// reached the printer (offline, printer busy, a declined touchscreen
-// authorization, errors in the printer file store) and, for the rows that did
-// reach it, a copy so the very same file can be sent again. One file pair per
+// cache.go keeps the G-code the uploads table needs at hand: one copy per upload,
+// referenced by its rows (UploadRow.FileID). For a printed row it makes "Print
+// again" possible; for a stored row (Upload without start, or an Upload+Start
+// that never reached the printer -- offline, busy, a declined touchscreen
+// authorization) it is the only copy and "Print" sends it. One file pair per
 // entry (<id>.data plus <id>.yaml) instead of an index -- a restart loses nothing
 // and the directory stays readable by hand.
 //
-// Nothing is retried automatically. A failed upload shows up in the uploads table
-// with an Upload button, a printed row with a kept copy offers "Print again".
-// Both live exactly as long as the table shows them -- see retention.go.
+// Nothing is retried automatically. A copy lives exactly as long as one of its
+// rows is in the table -- see retention.go.
 
 import (
 	"fmt"
@@ -29,10 +29,10 @@ import (
 // CacheDir is set from -cache / CACHE_DIR in main(); empty disables the cache.
 var CacheDir string
 
-// Entry kinds. A pending entry is a failed upload that never reached the
-// printer. A held entry belongs to a ledger row: the copy of a printed file, or
-// the file of an Orca "Upload" that was stored on sm2uploader only (row.Stored).
-// It is kept so a visible row can print it (again).
+// Entry kinds. Every entry is "held" now: it belongs to a ledger row -- the copy
+// of a printed file, or a file that is on sm2uploader only (row.Stored) -- and is
+// kept so that row can print it (again). "pending" is what older versions wrote
+// for a failed upload; MigratePending turns those into stored rows at startup.
 const (
 	CacheKindPending = "pending"
 	CacheKindHeld    = "held"
@@ -50,7 +50,8 @@ type CacheEntry struct {
 	Error  string    `yaml:"error,omitempty"`
 }
 
-// Held reports whether the file behind the entry already reached the printer.
+// Held reports whether the entry belongs to a ledger row (everything but a
+// legacy pending entry).
 func (e *CacheEntry) Held() bool { return e.Kind == CacheKindHeld }
 
 var (
@@ -134,21 +135,31 @@ func CacheLen() int {
 	return len(cacheMap)
 }
 
-// CachePending returns copies of the failed uploads, newest first. Only those
-// become table rows of their own; a held copy appears as the button of the row it
-// belongs to.
-func CachePending() []CacheEntry {
+// cacheLegacyPending returns the failed uploads older versions kept as entries of
+// their own ("pending"), oldest first. Only MigratePending reads them.
+func cacheLegacyPending() []CacheEntry {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
-	out := make([]CacheEntry, 0, len(cacheMap))
+	var out []CacheEntry
 	for _, e := range cacheMap {
-		if e.Held() {
-			continue
+		if !e.Held() {
+			out = append(out, *e)
 		}
-		out = append(out, *e)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
 	return out
+}
+
+// cacheMarkHeld turns a legacy pending entry into a copy that belongs to a row.
+func cacheMarkHeld(id string) error {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	e, ok := cacheMap[id]
+	if !ok {
+		return fmt.Errorf("cache entry %s is gone", id)
+	}
+	e.Kind, e.Reason, e.Error = CacheKindHeld, "", ""
+	return writeCacheMeta(e)
 }
 
 // CacheGet looks one entry up by id.
@@ -163,21 +174,6 @@ func CacheGet(id string) (*CacheEntry, bool) {
 // block is read from the tail before the upload).
 func CacheOpen(e *CacheEntry) (*os.File, error) {
 	return os.Open(cacheDataPath(e.ID))
-}
-
-// CacheMarkHeld turns a failed entry into a kept copy once the upload finally
-// reached the printer: from now on a row in the table references it and "Print
-// again" reads from it.
-func CacheMarkHeld(e *CacheEntry) error {
-	cacheMu.Lock()
-	defer cacheMu.Unlock()
-	if _, ok := cacheMap[e.ID]; !ok {
-		return fmt.Errorf("cache entry %s is gone", e.ID)
-	}
-	e.Kind = CacheKindHeld
-	e.Reason = ""
-	e.Error = ""
-	return writeCacheMeta(e)
 }
 
 // CachePrune deletes every entry that no longer belongs to the table -- the
@@ -201,53 +197,6 @@ func CachePrune(keep map[string]bool) (int, int64) {
 		bytes += e.Size
 	}
 	return n, bytes
-}
-
-// CacheDelete removes one failed upload by hand (the table's Delete). Held copies
-// are not touched here -- they go with their rows through CachePrune.
-func CacheDelete(id string) error {
-	cacheMu.Lock()
-	defer cacheMu.Unlock()
-	e, ok := cacheMap[id]
-	if !ok {
-		return fmt.Errorf("cache entry %s unknown", id)
-	}
-	if e.Held() {
-		return fmt.Errorf("cache entry %s belongs to a row -- delete the row instead", id)
-	}
-	delete(cacheMap, id)
-	os.Remove(cacheDataPath(id))
-	os.Remove(cacheMetaPath(id))
-	return nil
-}
-
-// CacheSetReason records why the upload failed in the first place. Separate from
-// CacheSetError because a later manual attempt must not overwrite it.
-func CacheSetReason(e *CacheEntry, cause error) {
-	cacheMu.Lock()
-	defer cacheMu.Unlock()
-	if cause != nil {
-		e.Reason = cause.Error()
-	} else {
-		e.Reason = ""
-	}
-	if err := writeCacheMeta(e); err != nil {
-		log.Printf("Cache: could not write %s: %s", cacheMetaPath(e.ID), err)
-	}
-}
-
-// CacheSetError records the last failed manual attempt.
-func CacheSetError(e *CacheEntry, cause error) {
-	cacheMu.Lock()
-	defer cacheMu.Unlock()
-	if cause != nil {
-		e.Error = cause.Error()
-	} else {
-		e.Error = ""
-	}
-	if err := writeCacheMeta(e); err != nil {
-		log.Printf("Cache: could not write %s: %s", cacheMetaPath(e.ID), err)
-	}
 }
 
 // writeCacheMeta writes the YAML record atomically: temp file, then rename.

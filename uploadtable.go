@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // uploadRowsRendered is how many ledger rows the table shows. It is not only a
@@ -24,16 +23,10 @@ func uploadsHint() string {
 	if TheLedger == nil {
 		return ""
 	}
-	if TheLedger.Len() == 0 && len(CachePending()) == 0 {
+	if TheLedger.Len() == 0 {
 		return ""
 	}
-	hint := fmt.Sprintf("(newest %d only — everything older is deleted with its file)", uploadRowsRendered)
-	// The cached rows are always rendered in full -- each one needs its Upload
-	// button -- so they are announced separately from the ledger limit.
-	if n := len(CachePending()); n > 0 {
-		hint += fmt.Sprintf(" — %d cached, NOT on the printer yet", n)
-	}
-	return hint
+	return fmt.Sprintf("(newest %d only — everything older is deleted with its file)", uploadRowsRendered)
 }
 
 // uploadsHTML renders the upload table: one row per (upload x slot), newest
@@ -43,8 +36,8 @@ func uploadsHTML() string {
 	if TheLedger == nil {
 		return `<p class="empty">Ledger not initialised.</p>`
 	}
-	items := uploadItems()
-	if len(items) == 0 {
+	rows := TheLedger.Recent(uploadRowsRendered)
+	if len(rows) == 0 {
 		return `<p class="empty">No uploads recorded yet.</p>`
 	}
 
@@ -57,45 +50,13 @@ func uploadsHTML() string {
 		`<th class="num">G-code g</th><th class="num">booked g</th><th class="num">remaining g</th>` +
 		`<th>Print time</th><th class="num">Cost</th><th>Action</th>` +
 		`</tr></thead><tbody>`)
-	for _, it := range items {
-		if it.cach != nil {
-			writeCacheRow(&b, *it.cach)
-			continue
-		}
-		writeUploadRow(&b, *it.row)
+	// Recent is newest first by ledger order, which is time order: new uploads
+	// are appended, migrated older rows are inserted at their time.
+	for _, r := range rows {
+		writeUploadRow(&b, r)
 	}
 	b.WriteString(`</tbody></table>`)
 	return b.String()
-}
-
-// tableEntry is one row of the uploads table: either a ledger row or a failed
-// upload waiting in the cache.
-type tableEntry struct {
-	time time.Time
-	row  *UploadRow
-	cach *CacheEntry
-}
-
-// uploadItems assembles what the table shows: the newest uploadRowsRendered
-// ledger rows plus every failed upload, one list sorted by time. A failed upload
-// is a row like any other and sits where it belongs instead of being pushed to
-// the top; it is always shown, because it needs its Upload button. Retention
-// (retention.go) keeps exactly this set -- no more and no less.
-func uploadItems() []tableEntry {
-	if TheLedger == nil {
-		return nil
-	}
-	rows := TheLedger.Recent(uploadRowsRendered)
-	cached := CachePending()
-	items := make([]tableEntry, 0, len(rows)+len(cached))
-	for i := range rows {
-		items = append(items, tableEntry{time: rows[i].Time, row: &rows[i]})
-	}
-	for i := range cached {
-		items = append(items, tableEntry{time: cached[i].Time, cach: &cached[i]})
-	}
-	sort.SliceStable(items, func(i, j int) bool { return items[i].time.After(items[j].time) })
-	return items
 }
 
 func writeUploadRow(b *strings.Builder, r UploadRow) {
@@ -145,29 +106,6 @@ func writeUploadRow(b *strings.Builder, r UploadRow) {
 		`</form>`)
 	b.WriteString(rowMenuHTML(r))
 	b.WriteString(`</td>`)
-	b.WriteString(`</tr>`)
-}
-
-// writeCacheRow renders a failed upload: same columns as a ledger row, the
-// non-existent booking fields as a dash, the file size where the cost sits, and
-// an Upload button that sends the file again and starts the print.
-func writeCacheRow(b *strings.Builder, c CacheEntry) {
-	statusTitle := ""
-	if c.Reason != "" {
-		statusTitle = ` title="` + html.EscapeString(c.Reason) + `"`
-	}
-	b.WriteString(`<tr>`)
-	b.WriteString(`<td class="nw">` + html.EscapeString(c.Time.In(berlinLoc()).Format("02 Jan 15:04")) + `</td>`)
-	b.WriteString(`<td class="file" title="` + html.EscapeString(c.File) + `">` + html.EscapeString(c.File) + `</td>`)
-	b.WriteString(`<td class="warn nw"` + statusTitle + `>cached — not on the printer</td>`)
-	b.WriteString(`<td class="num dim">—</td><td class="num dim">—</td><td class="num dim">—</td>`)
-	b.WriteString(`<td class="dim">—</td>`)
-	b.WriteString(`<td class="num dim">` + humanReadableSize(c.Size) + `</td>`)
-	b.WriteString(`<td class="act"><form method="POST" action="/cache/upload">` +
-		`<input type="hidden" name="id" value="` + html.EscapeString(c.ID) + `">` +
-		`<button type="submit" title="upload to the printer and start the print">Upload</button>` +
-		`</form>` + menuHTML([]string{deleteFormHTML("/cache/delete", c.ID, "Delete the cached "+c.File+"? It never reached the printer.")}) +
-		`</td>`)
 	b.WriteString(`</tr>`)
 }
 
@@ -296,10 +234,15 @@ func reprintHTML(r UploadRow) string {
 }
 
 // storedTagHTML flags a row whose file is on sm2uploader only -- an Orca "Upload"
-// without start that has not been printed yet.
+// without start, or an Upload+Start that never reached the printer. The latter
+// carries a warning sign with the reason as its tooltip.
 func storedTagHTML(r UploadRow) string {
 	if !r.Stored {
 		return ""
+	}
+	if r.UploadError != "" {
+		return `<span class="tag tag-err" title="NOT on the printer: ` + html.EscapeString(r.UploadError) +
+			` — use Print in the menu">&#9888; only sm2</span>`
 	}
 	return `<span class="tag" title="stored on sm2uploader only, not sent to the printer">only sm2</span>`
 }

@@ -19,27 +19,33 @@ var SpoolmanLowG = 100
 // read-modify-write of booked_g safe.
 var bookMu sync.Mutex
 
-// RecordStored writes the rows for an Orca "Upload" without start: the file was
-// kept on sm2uploader only and never sent to the printer. The rows are open at
-// 0 g -- the same state as after a cancel -- with the spool already resolved.
-func RecordStored(use *GcodeUse, name string, size int64, fileID string) {
-	recordRows(use, name, size, false, fileID, true)
+// RecordStored writes the rows for a file that is on sm2uploader only: an Orca
+// "Upload" without start, or an Upload+Start that never reached the printer
+// (uploadErr says why; empty for the plain upload). The rows are open at 0 g --
+// the same state as after a cancel -- with the spool already resolved, and
+// "Print" in the row menu sends the file later.
+func RecordStored(use *GcodeUse, name string, size int64, fileID, uploadErr string) {
+	rows := buildRows(use, name, size, fileID, time.Now().In(berlinLoc()))
+	for _, r := range rows {
+		r.Stored, r.UploadError = true, uploadErr
+	}
+	recordRows(rows, false, fileID)
 }
 
 // RecordUpload writes the ledger rows for a finished upload and, when the print
 // was actually started, books the consumption right away.
-func RecordUpload(use *GcodeUse, name string, size int64, started bool, fileID string) {
-	recordRows(use, name, size, started, fileID, false)
-}
-
-// recordRows is the body of RecordUpload and RecordStored.
 //
-// Only successful uploads get a row. If the upload landed but the start failed,
-// the row stays open (status "offen") and the user books it from the table.
+// Only successful uploads get a row this way. If the upload landed but the start
+// failed, the row stays open and the user books it from the table.
 // fileID is the cached copy of the very file that was sent ("" when no copy could
 // be kept); all rows of the upload share it, so any of them can print again.
-func recordRows(use *GcodeUse, name string, size int64, started bool, fileID string, stored bool) {
-	now := time.Now().In(berlinLoc())
+func RecordUpload(use *GcodeUse, name string, size int64, started bool, fileID string) {
+	recordRows(buildRows(use, name, size, fileID, time.Now().In(berlinLoc())), started, fileID)
+}
+
+// buildRows turns the consumption block of one upload into its ledger rows, one
+// per filament slot, all under one upload ID.
+func buildRows(use *GcodeUse, name string, size int64, fileID string, now time.Time) []*UploadRow {
 	uploadID := newUploadID(now)
 
 	var rows []*UploadRow
@@ -50,7 +56,6 @@ func recordRows(use *GcodeUse, name string, size int64, started bool, fileID str
 			ID: uploadID + "-T-", UploadID: uploadID, Time: now, File: name, Size: size,
 			FileID: fileID,
 			Slot:   -1, Status: StatusOpen, NoFilament: true,
-			Stored: stored,
 		})
 	} else {
 		for _, slot := range use.Slots {
@@ -61,7 +66,6 @@ func recordRows(use *GcodeUse, name string, size int64, started bool, fileID str
 				File:      name,
 				Size:      size,
 				FileID:    fileID,
-				Stored:    stored,
 				Slot:      slot.Slot,
 				Preset:    slot.Preset,
 				Colour:    slot.Colour,
@@ -77,6 +81,16 @@ func recordRows(use *GcodeUse, name string, size int64, started bool, fileID str
 			})
 		}
 	}
+	return rows
+}
+
+// recordRows appends the rows, logs them and books them when the print started.
+func recordRows(rows []*UploadRow, started bool, fileID string) {
+	if len(rows) == 0 {
+		return
+	}
+	name := rows[0].File
+	stored := rows[0].Stored
 
 	if TheLedger == nil {
 		return
@@ -134,7 +148,7 @@ func PrintedStored(uploadID string, started bool) {
 	}
 	rows := TheLedger.UploadRows(uploadID)
 	for _, r := range rows {
-		if err := TheLedger.Update(r.ID, func(row *UploadRow) { row.Stored = false }); err != nil {
+		if err := TheLedger.Update(r.ID, func(row *UploadRow) { row.Stored, row.UploadError = false, "" }); err != nil {
 			log.Printf("Ledger: %s", err)
 		}
 	}
@@ -172,6 +186,61 @@ func DeleteUpload(rowID string) (UploadRow, int, error) {
 	log.Printf("Deleted from the table: %s (%d row(s); Spoolman bookings unchanged)", row.File, n)
 	ApplyRetention()
 	return row, n, nil
+}
+
+// MarkUploadError records on every row of a stored upload why "Print" did not get
+// the file onto the printer. The rows stay stored; the next "Print" retries.
+func MarkUploadError(uploadID string, cause error) {
+	if TheLedger == nil || cause == nil {
+		return
+	}
+	msg := uploadFailure(cause)
+	for _, r := range TheLedger.UploadRows(uploadID) {
+		if err := TheLedger.Update(r.ID, func(row *UploadRow) { row.UploadError = msg }); err != nil {
+			log.Printf("Ledger: %s", err)
+		}
+	}
+}
+
+// MigratePending turns the failed uploads of older versions (cache entries of
+// kind "pending", shown as "cached -- not on the printer") into stored rows,
+// exactly what a failed Upload+Start produces now. Runs once at startup, before
+// the retention rule; the rows go in at their original time.
+func MigratePending() {
+	if TheLedger == nil {
+		return
+	}
+	for _, e := range cacheLegacyPending() {
+		f, err := CacheOpen(&e)
+		if err != nil {
+			log.Printf("Migration: %s: %s", e.File, err)
+			continue
+		}
+		use, perr := ParseGcodeUse(f)
+		f.Close()
+		if perr != nil {
+			log.Printf("Migration: could not read the consumption block of '%s': %s", e.File, perr)
+		}
+		reason := e.Error
+		if reason == "" {
+			reason = e.Reason
+		}
+		rows := buildRows(use, e.File, e.Size, e.ID, e.Time.In(berlinLoc()))
+		for _, r := range rows {
+			r.Stored, r.UploadError = true, reason
+		}
+		if err := TheLedger.Insert(rows...); err != nil {
+			log.Printf("Migration: ledger not written for '%s': %s", e.File, err)
+			continue
+		}
+		if err := cacheMarkHeld(e.ID); err != nil {
+			log.Printf("Migration: %s", err)
+		}
+		if TheSpoolman != nil {
+			ensureSpools(rows)
+		}
+		log.Printf("Migration: failed upload '%s' is now a stored row (only sm2)", e.File)
+	}
 }
 
 // ensureSpools resolves the spool for every row -- creating filament and spool

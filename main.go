@@ -74,7 +74,7 @@ func main() {
 	flag.StringVar(&OutputDir, "output", os.Getenv("OUTPUT_DIR"), "output directory to save original and fixed files")
 	flag.StringVar(&SpoolmanURL, "spoolman", os.Getenv("SPOOLMAN_URL"), "Spoolman base url, e.g. 'http://spoolman:8000'. Empty disables filament bookings.")
 	flag.StringVar(&UploadsFile, "uploads", os.Getenv("UPLOADS_FILE"), "upload ledger file (default: uploads.yaml next to -knownhosts)")
-	flag.StringVar(&CacheDir, "cache", os.Getenv("CACHE_DIR"), "cache dir for failed uploads, kept until they are sent by hand from the table (default: cache/ next to -knownhosts)")
+	flag.StringVar(&CacheDir, "cache", os.Getenv("CACHE_DIR"), "cache dir for the G-code copies behind the upload table: stored uploads and repeat prints (default: cache/ next to -knownhosts)")
 	flag.IntVar(&SpoolmanLowG, "lowg", parseIntEnv("SPOOLMAN_LOW_G", 100), "warn below this remaining spool weight in grams")
 	flag.BoolVar(&Debug, "debug", parseBoolEnv("DEBUG", false), "debug mode")
 
@@ -93,14 +93,17 @@ func main() {
 	}
 	TheLedger = LoadLedger(UploadsFile)
 	CacheLoad()
-	// The table is the retention rule: drop what it would not render before the
-	// first upload, so a long-running instance cannot grow for ever.
-	ApplyRetention()
 	if TheSpoolman = NewSpoolman(SpoolmanURL); TheSpoolman != nil {
 		log.Printf("Spoolman: %s (warn below %d g)", SpoolmanURL, SpoolmanLowG)
 	} else {
 		log.Printf("Spoolman not configured -- uploads are only recorded, never booked")
 	}
+	// Failed uploads of older versions become stored rows (needs Spoolman for
+	// the spool lookup, and has to run before the retention rule).
+	MigratePending()
+	// The table is the retention rule: drop what it would not render before the
+	// first upload, so a long-running instance cannot grow for ever.
+	ApplyRetention()
 
 	if Debug {
 		log.Printf("-- Debug mode: %s", Version)

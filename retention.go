@@ -7,9 +7,7 @@ package main
 //
 // Concretely, ApplyRetention keeps:
 //   - the newest uploadRowsRendered ledger rows,
-//   - their G-code copies (a row without its file could not print again),
-//   - every failed upload, because the table always shows all of them and each
-//     one still needs its Upload button.
+//   - their G-code copies (a row without its file could not print (again)).
 //
 // Everything else -- older ledger rows and every file nothing points at -- is
 // removed. Bookings themselves are not lost by this: Spoolman keeps the usage,
@@ -23,17 +21,13 @@ func ApplyRetention() {
 		return
 	}
 
-	items := uploadItems()
-	keepRows := make(map[string]bool, len(items))
-	keepFiles := make(map[string]bool, len(items))
-	for _, it := range items {
-		if it.cach != nil {
-			keepFiles[it.cach.ID] = true
-			continue
-		}
-		keepRows[it.row.ID] = true
-		if it.row.FileID != "" {
-			keepFiles[it.row.FileID] = true
+	rows := TheLedger.Recent(uploadRowsRendered)
+	keepRows := make(map[string]bool, len(rows))
+	keepFiles := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		keepRows[r.ID] = true
+		if r.FileID != "" {
+			keepFiles[r.FileID] = true
 		}
 	}
 
